@@ -18,7 +18,7 @@ export default function HowItWorksPage() {
 
         <div className="flex justify-center gap-3 pt-2">
           <Link
-            href="/vault"
+            href="/"
             className={buttonStyles({ variant: "solid", radius: "full" })}
           >
             Open the Vault

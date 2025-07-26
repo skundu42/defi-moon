@@ -1,3 +1,4 @@
+// components/SeriesTable.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -90,9 +91,9 @@ export default function SeriesTable() {
           }
         }
 
-        // de-dup (in case of reorgs) and sort newest first
+        // de-dup (in case of reorgs) and sort newest expiry first
         const uniq = new Map<string, Row>();
-        for (const r of acc) uniq.set(`${r.id.toString()}`, r);
+        for (const r of acc) uniq.set(r.id.toString(), r);
         const list = Array.from(uniq.values()).sort((a, b) =>
           a.expiry === b.expiry ? Number(b.id - a.id) : Number(b.expiry - a.expiry)
         );
@@ -129,17 +130,24 @@ export default function SeriesTable() {
     },
   });
 
+  // ---- Only show ACTIVE series (expiry in the future) ----
+  const nowSec = Math.floor(Date.now() / 1000);
+  const activeRows = useMemo(
+    () => rows.filter((r) => Number(r.expiry) > nowSec),
+    [rows, nowSec]
+  );
+
   return (
     <Card className="p-5">
-      <h3 className="text-lg font-medium mb-3">Series</h3>
+      <h3 className="text-lg font-medium mb-3">Active Series</h3>
 
-      {loading && rows.length === 0 ? (
+      {loading && activeRows.length === 0 ? (
         <div className="rounded-xl border border-default-200/50 bg-content2 p-3 text-sm text-foreground/70">
           Loading series from chain…
         </div>
-      ) : rows.length === 0 ? (
+      ) : activeRows.length === 0 ? (
         <div className="rounded-xl border border-default-200/50 bg-content2 p-3 text-sm text-foreground/70">
-          No series found yet.
+          No active series found.
         </div>
       ) : (
         <div className="rounded-xl border border-default-200/50 bg-content2 p-3 overflow-x-auto">
@@ -153,7 +161,7 @@ export default function SeriesTable() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
+              {activeRows.map((r) => (
                 <tr key={r.id.toString()} className="border-t border-default-200/50">
                   <td className="p-2 font-mono">{r.id.toString()}</td>
                   <td className="p-2">{symFromAddress(r.underlying)}</td>
@@ -165,11 +173,6 @@ export default function SeriesTable() {
           </table>
         </div>
       )}
-
-      {/* small footer with source info */}
-      <div className="mt-2 text-xs text-default-500">
-        Source: on-chain logs from {String(VAULT_ADDRESS)} (chunked via <code>getLogs</code>, live via <code>useWatchContractEvent</code>).
-      </div>
     </Card>
   );
 }

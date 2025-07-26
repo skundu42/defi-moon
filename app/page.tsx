@@ -1,9 +1,6 @@
 // app/vault/page.tsx
 "use client";
 
-import { Link } from "@heroui/link";
-import { button as buttonStyles } from "@heroui/theme";
-
 import DepositWithdraw from "@/components/DepositWithdraw";
 import MintOptionsForm from "@/components/MintOptionsForm";
 import CreateLimitOrder from "@/components/CreateLimitOrder";
@@ -12,51 +9,59 @@ import SeriesTable from "@/components/SeriesTable";
 
 export default function VaultPage() {
   return (
-    <section className="mx-auto max-w-5xl py-8 md:py-12 space-y-8">
+    <section className="mx-auto max-w-6xl py-10 md:py-14 space-y-10">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">Covered Call Vault — Gnosis</h1>
-          <p className="text-default-500 mt-1">
-            Manage collateral, mint options, create 1inch orders, and settle/exercise.
-          </p>
+      <header className="flex flex-col gap-3">
+        <h1 className="text-3xl md:text-4xl font-semibold tracking-tight">
+          Covered Call Vault
+        </h1>
+        <p className="text-default-500 max-w-2xl">
+          Manage collateral, mint options, create 1inch limit orders, and handle
+          settlement workflows — all in one place.
+        </p>
+
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <span className="inline-flex items-center rounded-full border border-default-200/60 bg-content2 px-2.5 py-1 text-xs text-default-600">
+            Network: Gnosis Chain
+          </span>
+          <span className="inline-flex items-center rounded-full border border-default-200/60 bg-content2 px-2.5 py-1 text-xs text-default-600">
+            Underlying: GNO
+          </span>
         </div>
+      </header>
 
-        <Link
-          href="/"
-          className={buttonStyles({ variant: "bordered", radius: "full" })}
-        >
-          Home
-        </Link>
-      </div>
-
-      {/* Series Table (read-only list for users) */}
-      <div className="rounded-2xl border border-default-200/50 bg-content1 p-5">
-        <h2 className="text-lg font-medium mb-3">Series</h2>
+      {/* Series Table */}
+      <div className="space-y-3">
+        <h2 className="text-lg font-medium">Series</h2>
+        {/* SeriesTable already renders its own Card */}
         <SeriesTable />
       </div>
 
       {/* Collateral */}
-      <div className="rounded-2xl border border-default-200/50 bg-content1 p-5">
-        <h2 className="text-lg font-medium mb-3">Collateral</h2>
+      <div className="space-y-3">
+        <h2 className="text-lg font-medium">Collateral</h2>
+        {/* DepositWithdraw already renders its own Card */}
         <DepositWithdraw />
       </div>
 
       {/* Mint Options */}
-      <div className="rounded-2xl border border-default-200/50 bg-content1 p-5">
-        <h2 className="text-lg font-medium mb-3">Mint Options</h2>
+      <div className="space-y-3">
+        <h2 className="text-lg font-medium">Mint Options</h2>
+        {/* MintOptionsForm renders its own Card */}
         <MintOptionsForm />
       </div>
 
       {/* Create 1inch Order */}
-      <div className="rounded-2xl border border-default-200/50 bg-content1 p-5">
-        <h2 className="text-lg font-medium mb-3">Create 1inch Order</h2>
+      <div className="space-y-3">
+        <h2 className="text-lg font-medium">Create 1inch Order</h2>
+        {/* CreateLimitOrder renders its own Card */}
         <CreateLimitOrder />
       </div>
 
       {/* Post-expiry lifecycle */}
-      <div className="rounded-2xl border border-default-200/50 bg-content1 p-5">
-        <h2 className="text-lg font-medium mb-3">Settle / Exercise / Reclaim</h2>
+      <div className="space-y-3">
+        <h2 className="text-lg font-medium">Settle / Exercise / Reclaim</h2>
+        {/* SettleExerciseReclaim renders its own Card */}
         <SettleExerciseReclaim />
       </div>
     </section>

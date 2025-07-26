@@ -1,245 +1,484 @@
+// lib/contracts.ts
+/* eslint-disable @typescript-eslint/no-unused-vars */
+
 import type { Address } from "viem";
 
-/* =========================
- * Addresses from environment
- * ========================= */
+/* ----------------------------- Env & Constants ---------------------------- */
 
-export const VAULT_ADDRESS: Address =
-  (process.env.NEXT_PUBLIC_VAULT_ADDRESS as Address) ??
-  "0x0000000000000000000000000000000000000000";
+const asAddress = (v?: string) =>
+  (v?.match(/^0x[a-fA-F0-9]{40}$/) ? (v as `0x${string}`) : ("0x0000000000000000000000000000000000000000" as const));
 
-/** Strongly recommended to bound log scans (e.g. for SeriesTable). */
-export const VAULT_DEPLOY_BLOCK: bigint | undefined = (() => {
-  const raw = process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK;
-  if (!raw) return undefined;
-  try {
-    const n = BigInt(raw);
-    return n > 0n ? n : undefined;
-  } catch {
-    return undefined;
-  }
-})();
+export const CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? "100"); // Gnosis default
+export const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL ?? "https://rpc.gnosis.gateway.fm";
 
-/** Strike price display decimals (purely UI formatting; defaults to 18). */
-export const STRIKE_DECIMALS: number = (() => {
-  const raw = process.env.NEXT_PUBLIC_STRIKE_DECIMALS;
-  const n = raw ? Number(raw) : 18;
-  return Number.isFinite(n) && n >= 0 && n <= 36 ? n : 18;
-})();
+export const EXPLORER_URL = process.env.NEXT_PUBLIC_EXPLORER ?? "https://gnosisscan.io";
 
-/** 1inch Limit Order Protocol v4 (Gnosis) — spender for maker ERC-20 approvals. */
-export const LOP_V4_GNOSIS: Address =
-  "0x111111125421ca6dc452d289314280a0f8842a65";
+/** 1inch Limit Order Protocol v4 (Gnosis) */
+export const LOP_V4_GNOSIS = asAddress(process.env.NEXT_PUBLIC_LOP) || ("0x111111125421ca6dc452d289314280a0f8842a65" as const);
 
-/** ERC-20 helper ABI (minimal). */
-export const erc20Abi = [
-  { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
-  { type: "function", name: "symbol", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
-  { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ name: "owner", type: "address" }], outputs: [{ type: "uint256" }] },
-  {
-    type: "function",
-    name: "allowance",
-    stateMutability: "view",
-    inputs: [
-      { name: "owner", type: "address" },
-      { name: "spender", type: "address" },
-    ],
-    outputs: [{ type: "uint256" }],
-  },
-  {
-    type: "function",
-    name: "approve",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "spender", type: "address" },
-      { name: "amount", type: "uint256" },
-    ],
-    outputs: [{ type: "bool" }],
-  },
-] as const;
+/** 1inch Orderbook API (v4) */
+export const ORDERBOOK_API_BASE = process.env.NEXT_PUBLIC_ONEINCH_ORDERBOOK_API ?? "https://orderbook-api.1inch.io";
+/** 1inch Project (public) key — keep in NEXT_PUBLIC_* as per 1inch docs for client requests (or proxy via /api) */
+export const ONEINCH_AUTH_KEY = process.env.NEXT_PUBLIC_ONEINCH_AUTH_KEY ?? "";
 
-/* =========================
- * Your OptionsVault ABI (matches the contract you posted)
- * ========================= */
+/** Core contracts (your deployments) */
+export const VAULT_ADDRESS = asAddress(process.env.NEXT_PUBLIC_VAULT_ADDRESS);
+export const CALLTOKEN_ADDRESS = asAddress(process.env.NEXT_PUBLIC_CALLTOKEN_ADDRESS);
+export const WRAPPER_ADDRESS = asAddress(process.env.NEXT_PUBLIC_WRAPPER_ADDRESS);
 
+/** Optional: oracle address for GNO/WXDAI (1e18) if you auto-fill anywhere */
+export const ORACLE_GNO_WXDAI = asAddress(process.env.NEXT_PUBLIC_ORACLE_GNO_WXDAI);
+
+/* --------------------------------- ABIs ---------------------------------- */
 /**
- * event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry);
- * defineSeries(address,uint8,uint256,uint64,uint256,address) returns (uint256)
- * deposit(uint256)
- * withdraw(uint256)
- * mintOptions(uint256 id, uint256 qty)
- * settleSeries(uint256 id)
- * exercise(uint256 id, uint256 qty)
- * reclaim(uint256 id)
+ * Updated vault ABI with pro-rata accounting:
+ * - new storage views: totalLockedBySeries, lockedBaselineAtSettle, totalExerciseOut
+ * - new views: exerciseShareOf, reclaimableOf
+ * - new events: ExercisePayout, ReclaimCalculated
  */
 export const vaultAbi = [
-  {
-    type: "event",
-    name: "SeriesDefined",
-    inputs: [
-      { name: "id", type: "uint256", indexed: true },
-      { name: "underlying", type: "address", indexed: true },
-      { name: "strike", type: "uint256", indexed: false },
-      { name: "expiry", type: "uint64", indexed: false },
-    ],
-    anonymous: false,
-  },
+  // --- AccessControl ---
   {
     type: "function",
-    name: "defineSeries",
+    stateMutability: "view",
+    name: "hasRole",
+    inputs: [
+      { name: "role", type: "bytes32" },
+      { name: "account", type: "address" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+
+  // --- Core series mgmt ---
+  {
+    type: "function",
     stateMutability: "nonpayable",
+    name: "defineSeries",
     inputs: [
       { name: "underlying", type: "address" },
       { name: "underlyingDecimals", type: "uint8" },
-      { name: "strike", type: "uint256" },              // 1e18 WXDAI
-      { name: "expiry", type: "uint64" },                // unix
-      { name: "collateralPerOption", type: "uint256" },  // in underlying decimals
+      { name: "strike", type: "uint256" }, // 1e18 WXDAI
+      { name: "expiry", type: "uint64" },
+      { name: "collateralPerOption", type: "uint256" }, // underlying decimals
       { name: "oracle", type: "address" },
     ],
     outputs: [{ name: "id", type: "uint256" }],
   },
   {
+    type: "event",
+    name: "SeriesDefined",
+    inputs: [
+      { indexed: true, name: "id", type: "uint256" },
+      { indexed: true, name: "underlying", type: "address" },
+      { indexed: false, name: "strike", type: "uint256" },
+      { indexed: false, name: "expiry", type: "uint64" },
+    ],
+    anonymous: false,
+  },
+
+  // --- Balances / collateral ---
+  {
     type: "function",
+    stateMutability: "nonpayable",
     name: "deposit",
-    stateMutability: "nonpayable",
     inputs: [{ name: "amount", type: "uint256" }],
     outputs: [],
   },
   {
     type: "function",
+    stateMutability: "nonpayable",
     name: "withdraw",
-    stateMutability: "nonpayable",
     inputs: [{ name: "amount", type: "uint256" }],
     outputs: [],
   },
   {
     type: "function",
-    name: "mintOptions",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "id", type: "uint256" },
-      { name: "qty", type: "uint256" },
-    ],
-    outputs: [],
-  },
-  {
-    type: "function",
-    name: "settleSeries",
-    stateMutability: "nonpayable",
-    inputs: [{ name: "id", type: "uint256" }],
-    outputs: [],
-  },
-  {
-    type: "function",
-    name: "exercise",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "id", type: "uint256" },
-      { name: "qty", type: "uint256" },
-    ],
-    outputs: [],
-  },
-  {
-    type: "function",
-    name: "reclaim",
-    stateMutability: "nonpayable",
-    inputs: [{ name: "id", type: "uint256" }],
-    outputs: [],
-  },
-  // Optional handy view if you need it elsewhere:
-  {
-    type: "function",
-    name: "freeCollateralOf",
     stateMutability: "view",
+    name: "freeCollateralOf",
     inputs: [{ name: "maker", type: "address" }],
-    outputs: [{ type: "uint256" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "event",
+    name: "Deposited",
+    inputs: [
+      { indexed: true, name: "maker", type: "address" },
+      { indexed: false, name: "amount", type: "uint256" },
+    ],
+    anonymous: false,
+  },
+  {
+    type: "event",
+    name: "Withdrawn",
+    inputs: [
+      { indexed: true, name: "maker", type: "address" },
+      { indexed: false, name: "amount", type: "uint256" },
+    ],
+    anonymous: false,
+  },
+
+  // --- Mint / lock ---
+  {
+    type: "function",
+    stateMutability: "nonpayable",
+    name: "mintOptions",
+    inputs: [
+      { name: "id", type: "uint256" },
+      { name: "qty", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "event",
+    name: "Minted",
+    inputs: [
+      { indexed: true, name: "maker", type: "address" },
+      { indexed: true, name: "id", type: "uint256" },
+      { indexed: false, name: "qty", type: "uint256" },
+      { indexed: false, name: "collateralLocked", type: "uint256" },
+    ],
+    anonymous: false,
+  },
+
+  // --- Settle / exercise / reclaim ---
+  {
+    type: "function",
+    stateMutability: "nonpayable",
+    name: "settleSeries",
+    inputs: [{ name: "id", type: "uint256" }],
+    outputs: [],
+  },
+  {
+    type: "event",
+    name: "Settled",
+    inputs: [
+      { indexed: true, name: "id", type: "uint256" },
+      { indexed: false, name: "priceWXDAI", type: "uint256" },
+      { indexed: false, name: "inTheMoneyAtSettle", type: "bool" },
+    ],
+    anonymous: false,
+  },
+  {
+    type: "function",
+    stateMutability: "nonpayable",
+    name: "exercise",
+    inputs: [
+      { name: "id", type: "uint256" },
+      { name: "qty", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "event",
+    name: "Exercised",
+    inputs: [
+      { indexed: true, name: "holder", type: "address" },
+      { indexed: true, name: "id", type: "uint256" },
+      { indexed: false, name: "qty", type: "uint256" },
+      { indexed: false, name: "payoffUnderlying", type: "uint256" },
+    ],
+    anonymous: false,
+  },
+  {
+    type: "event",
+    name: "ExercisePayout",
+    inputs: [
+      { indexed: true, name: "id", type: "uint256" },
+      { indexed: true, name: "holder", type: "address" },
+      { indexed: false, name: "qty", type: "uint256" },
+      { indexed: false, name: "payout", type: "uint256" },
+      { indexed: false, name: "totalExerciseOutAfter", type: "uint256" },
+    ],
+    anonymous: false,
+  },
+  {
+    type: "function",
+    stateMutability: "nonpayable",
+    name: "reclaim",
+    inputs: [{ name: "id", type: "uint256" }],
+    outputs: [],
+  },
+  {
+    type: "event",
+    name: "ReclaimCalculated",
+    inputs: [
+      { indexed: true, name: "maker", type: "address" },
+      { indexed: true, name: "id", type: "uint256" },
+      { indexed: false, name: "makerLockedBefore", type: "uint256" },
+      { indexed: false, name: "exerciseShare", type: "uint256" },
+      { indexed: false, name: "reclaimed", type: "uint256" },
+      { indexed: false, name: "totalLockedBySeriesAfter", type: "uint256" },
+    ],
+    anonymous: false,
+  },
+  {
+    type: "event",
+    name: "Reclaimed",
+    inputs: [
+      { indexed: true, name: "maker", type: "address" },
+      { indexed: true, name: "id", type: "uint256" },
+      { indexed: false, name: "amount", type: "uint256" },
+    ],
+    anonymous: false,
+  },
+
+  // --- Views / helpers ---
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "series",
+    inputs: [{ name: "id", type: "uint256" }],
+    outputs: [
+      { name: "underlying", type: "address" },
+      { name: "underlyingDecimals", type: "uint8" },
+      { name: "strike", type: "uint256" },
+      { name: "expiry", type: "uint64" },
+      { name: "collateralPerOption", type: "uint256" },
+      { name: "oracle", type: "address" },
+      { name: "settled", type: "bool" },
+    ],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "settlePrice",
+    inputs: [{ name: "id", type: "uint256" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "lockedPerSeries",
+    inputs: [
+      { name: "maker", type: "address" },
+      { name: "id", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "totalLockedBySeries",
+    inputs: [{ name: "id", type: "uint256" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "lockedBaselineAtSettle",
+    inputs: [{ name: "id", type: "uint256" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "totalExerciseOut",
+    inputs: [{ name: "id", type: "uint256" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "exerciseShareOf",
+    inputs: [
+      { name: "maker", type: "address" },
+      { name: "id", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "reclaimableOf",
+    inputs: [
+      { name: "maker", type: "address" },
+      { name: "id", type: "uint256" },
+    ],
+    outputs: [
+      { name: "reclaimable", type: "uint256" },
+      { name: "exerciseShare", type: "uint256" },
+    ],
+  },
+
+  // --- Pausable admin (optional to call from UI) ---
+  {
+    type: "function",
+    stateMutability: "nonpayable",
+    name: "pause",
+    inputs: [],
+    outputs: [],
+  },
+  {
+    type: "function",
+    stateMutability: "nonpayable",
+    name: "unpause",
+    inputs: [],
+    outputs: [],
   },
 ] as const;
 
-/* =========================
- * Wrapper + CallToken (ERC-1155) exports
- * ========================= */
-
-export const CALLTOKEN_ADDRESS: Address =
-  (process.env.NEXT_PUBLIC_CALLTOKEN_ADDRESS as Address) ??
-  "0x0000000000000000000000000000000000000000";
-
-export const WRAPPER_ADDRESS: Address =
-  (process.env.NEXT_PUBLIC_WRAPPER_ADDRESS as Address) ??
-  "0x0000000000000000000000000000000000000000";
-
-/** Minimal ERC-1155 ABI we use for approvals & balances. */
+/* ------------------------------ CallToken (ERC1155) ------------------------------ */
+// Minimal ERC-1155 surface used by the app: balances & approvals & transfer
 export const erc1155Abi = [
   {
     type: "function",
-    name: "isApprovedForAll",
     stateMutability: "view",
-    inputs: [
-      { name: "owner", type: "address" },
-      { name: "operator", type: "address" }
-    ],
-    outputs: [{ type: "bool" }]
-  },
-  {
-    type: "function",
-    name: "setApprovalForAll",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "operator", type: "address" },
-      { name: "approved", type: "bool" }
-    ],
-    outputs: []
-  },
-  {
-    type: "function",
     name: "balanceOf",
-    stateMutability: "view",
     inputs: [
       { name: "account", type: "address" },
-      { name: "id", type: "uint256" }
+      { name: "id", type: "uint256" },
     ],
-    outputs: [{ type: "uint256" }]
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "isApprovedForAll",
+    inputs: [
+      { name: "account", type: "address" },
+      { name: "operator", type: "address" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    type: "function",
+    stateMutability: "nonpayable",
+    name: "setApprovalForAll",
+    inputs: [
+      { name: "operator", type: "address" },
+      { name: "approved", type: "bool" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    stateMutability: "nonpayable",
+    name: "safeTransferFrom",
+    inputs: [
+      { name: "from", type: "address" },
+      { name: "to", type: "address" },
+      { name: "id", type: "uint256" },
+      { name: "value", type: "uint256" },
+      { name: "data", type: "bytes" },
+    ],
+    outputs: [],
   },
 ] as const;
 
-/** Wrapper ABI (ensureSeriesERC20 / wrap / unwrap / erc20For). */
+/* ---------------------------------- ERC-20 ---------------------------------- */
+
+export const erc20Abi = [
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "decimals",
+    inputs: [],
+    outputs: [{ name: "", type: "uint8" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "symbol",
+    inputs: [],
+    outputs: [{ name: "", type: "string" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "name",
+    inputs: [],
+    outputs: [{ name: "", type: "string" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "balanceOf",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    stateMutability: "view",
+    name: "allowance",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    stateMutability: "nonpayable",
+    name: "approve",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+] as const;
+
+/* ------------------------------- Wrapper (ERC1155 -> ERC20) ------------------------------- */
+/**
+ * Minimal interface used by the UI:
+ * - erc20OfSeries(id) -> address
+ * - ensureSeriesERC20(id, name, symbol) -> address
+ * - wrap(id, qty)
+ * (If your actual function names differ, align here & in your hook.)
+ */
 export const wrapperAbi = [
   {
     type: "function",
-    name: "erc20For",
     stateMutability: "view",
+    name: "erc20OfSeries",
     inputs: [{ name: "id", type: "uint256" }],
-    outputs: [{ type: "address" }],
+    outputs: [{ name: "", type: "address" }],
   },
   {
     type: "function",
-    name: "ensureSeriesERC20",
     stateMutability: "nonpayable",
+    name: "ensureSeriesERC20",
     inputs: [
       { name: "id", type: "uint256" },
-      { name: "name_", type: "string" },
-      { name: "symbol_", type: "string" },
+      { name: "name", type: "string" },
+      { name: "symbol", type: "string" },
     ],
-    outputs: [{ type: "address" }],
+    outputs: [{ name: "", type: "address" }],
   },
   {
     type: "function",
-    name: "wrap",
     stateMutability: "nonpayable",
+    name: "wrap",
     inputs: [
       { name: "id", type: "uint256" },
       { name: "qty", type: "uint256" },
     ],
     outputs: [],
   },
+  // (optional) unwrap if you expose it
   {
     type: "function",
-    name: "unwrap",
     stateMutability: "nonpayable",
+    name: "unwrap",
     inputs: [
       { name: "id", type: "uint256" },
-      { name: "amount", type: "uint256" },
+      { name: "qty", type: "uint256" },
     ],
     outputs: [],
   },
 ] as const;
+
+/* -------------------------------- Convenience -------------------------------- */
+
+export const ADDRESSES = {
+  chainId: CHAIN_ID,
+  rpcUrl: RPC_URL,
+  explorer: EXPLORER_URL,
+  oneInchLopV4: LOP_V4_GNOSIS,
+  orderbookApiBase: ORDERBOOK_API_BASE,
+  oneInchAuthKey: ONEINCH_AUTH_KEY,
+  vault: VAULT_ADDRESS,
+  callToken1155: CALLTOKEN_ADDRESS,
+  wrapper: WRAPPER_ADDRESS,
+  oracleGnoWx: ORACLE_GNO_WXDAI,
+} as const;

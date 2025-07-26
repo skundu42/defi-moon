@@ -6,18 +6,14 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-
 import {CallToken} from "../token/CallToken.sol";
 import {IdLib} from "../libs/IdLib.sol";
 
 interface IPriceLike {
-    function latestAnswer() external view returns (uint256); // 1e18
+    function latestAnswer() external view returns (uint256); // 1e18 (WXDAI)
 }
 
-/// @notice Covered-call vault for the **1inch LOP v3** flow:
-/// - Maker deposits GNO, mints ERC-1155 options (collateral locked).
-/// - Sells those options via 1inch off-chain order.
-/// - Post-expiry, vault settles, buyers exercise, makers reclaim.
+/// @notice Covered-call vault with pro-rata realized PnL accounting.
 contract OptionsVault is AccessControl, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -25,37 +21,53 @@ contract OptionsVault is AccessControl, Pausable, ReentrancyGuard {
     bytes32 public constant SERIES_ADMIN_ROLE = keccak256("SERIES_ADMIN_ROLE");
 
     // ---------- immutables ----------
-    IERC20 public immutable UNDERLYING; // GNO
+    IERC20 public immutable UNDERLYING;
     CallToken public immutable CALL_TOKEN;
 
     // ---------- storage ----------
     struct Series {
-        address underlying;          // GNO
-        uint8   underlyingDecimals;  // 18
-        uint256 strike;              // in WXDAI 1e18
-        uint64  expiry;              // unix
-        uint256 collateralPerOption; // in underlying decimals
-        address oracle;              // returns price(GNO/WXDAI) 1e18
+        address underlying;          // must equal UNDERLYING
+        uint8   underlyingDecimals;
+        uint256 strike;              // WXDAI 1e18
+        uint64  expiry;              // unix seconds
+        uint256 collateralPerOption; // underlying decimals
+        address oracle;              // returns price(UNDERLYING/WXDAI) 1e18
         bool    settled;
     }
 
     // maker balances
     mapping(address => uint256) public collateralBalance;
-    mapping(address => uint256) public totalLocked; // cached sum of all locked amounts
+    mapping(address => uint256) public totalLocked;
     mapping(address => mapping(uint256 => uint256)) public lockedPerSeries;
 
-    // series
+    // series data
     mapping(uint256 => Series) public series;
-    mapping(uint256 => uint256) public settlePrice; // 1e18
+    mapping(uint256 => uint256) public settlePrice;          // WXDAI 1e18
+
+    // series aggregates (for accurate realized PnL)
+    mapping(uint256 => uint256) public totalLockedBySeries;  // live (decreases on each reclaim)
+    mapping(uint256 => uint256) public lockedBaselineAtSettle; // NEW: frozen at settleSeries()
+    mapping(uint256 => uint256) public totalExerciseOut;     // underlying sent via exercise
 
     // ---------- events ----------
     event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry);
     event Deposited(address indexed maker, uint256 amount);
     event Withdrawn(address indexed maker, uint256 amount);
     event Minted(address indexed maker, uint256 indexed id, uint256 qty, uint256 collateralLocked);
-    event Settled(uint256 indexed id, uint256 priceWXDAI, bool inTheMoney);
-    event Exercised(address indexed holder, uint256 indexed id, uint256 qty, uint256 payoffGNO);
+    event Settled(uint256 indexed id, uint256 priceWXDAI, bool inTheMoneyAtSettle);
+    event Exercised(address indexed holder, uint256 indexed id, uint256 qty, uint256 payoffUnderlying);
     event Reclaimed(address indexed maker, uint256 indexed id, uint256 amount);
+
+    // analytics-friendly
+    event ExercisePayout(uint256 indexed id, address indexed holder, uint256 qty, uint256 payout, uint256 totalExerciseOutAfter);
+    event ReclaimCalculated(
+        address indexed maker,
+        uint256 indexed id,
+        uint256 makerLockedBefore,
+        uint256 exerciseShare,
+        uint256 reclaimed,
+        uint256 totalLockedBySeriesAfter
+    );
 
     // ---------- constants ----------
     uint256 private constant ONE = 1e18;
@@ -117,7 +129,7 @@ contract OptionsVault is AccessControl, Pausable, ReentrancyGuard {
         return collateralBalance[maker] - totalLocked[maker];
     }
 
-    // ------------------ Mint (pre-sell on 1inch v3) ------------------
+    // ------------------ Mint ------------------
 
     function mintOptions(uint256 id, uint256 qty) external nonReentrant whenNotPaused {
         Series memory s = series[id];
@@ -129,6 +141,7 @@ contract OptionsVault is AccessControl, Pausable, ReentrancyGuard {
 
         lockedPerSeries[msg.sender][id] += required;
         totalLocked[msg.sender] += required;
+        totalLockedBySeries[id] += required; // live aggregate
 
         CALL_TOKEN.mint(msg.sender, id, qty);
         emit Minted(msg.sender, id, qty, required);
@@ -146,11 +159,14 @@ contract OptionsVault is AccessControl, Pausable, ReentrancyGuard {
         settlePrice[id] = price;
         s.settled = true;
 
+        // Freeze baseline for pro-rata
+        lockedBaselineAtSettle[id] = totalLockedBySeries[id];
+
         bool itm = price > s.strike;
         emit Settled(id, price, itm);
     }
 
-    /// @notice Buyer exercises, receiving GNO worth intrinsic value.
+    /// @notice Buyer exercises after settlement. Pays intrinsic in UNDERLYING.
     function exercise(uint256 id, uint256 qty) external nonReentrant whenNotPaused {
         Series memory s = series[id];
         require(s.settled, "not settled");
@@ -159,37 +175,91 @@ contract OptionsVault is AccessControl, Pausable, ReentrancyGuard {
         require(qty > 0 && qty <= bal, "bad qty");
 
         uint256 price = settlePrice[id];
-        uint256 payoffGNO = 0;
+        uint256 payoff = 0;
 
         if (price > s.strike) {
             uint256 intrinsicWx = (price - s.strike) * qty; // 1e18 * qty
-            payoffGNO = intrinsicWx * ONE / price;
+            payoff = intrinsicWx * ONE / price;              // underlying (1e18)
         }
 
         CALL_TOKEN.burn(msg.sender, id, qty);
 
-        if (payoffGNO > 0) {
-            UNDERLYING.safeTransfer(msg.sender, payoffGNO);
+        if (payoff > 0) {
+            UNDERLYING.safeTransfer(msg.sender, payoff);
+            totalExerciseOut[id] += payoff;
+            emit ExercisePayout(id, msg.sender, qty, payoff, totalExerciseOut[id]);
         }
 
-        emit Exercised(msg.sender, id, qty, payoffGNO);
+        emit Exercised(msg.sender, id, qty, payoff);
     }
 
-    /// @notice Maker reclaims their locked collateral after settlement.
-    /// @dev MVP logic: frees everything they locked. For exact accounting vs exercised qty,
-    ///      track per-maker minted/exercised or cash-settle in WXDAI.
+    /// @notice Maker reclaims collateral minus pro-rata exercise share, using baseline frozen at settle.
     function reclaim(uint256 id) external nonReentrant whenNotPaused {
         Series memory s = series[id];
         require(s.settled, "not settled");
 
-        uint256 locked = lockedPerSeries[msg.sender][id];
-        if (locked == 0) return;
+        uint256 makerLocked = lockedPerSeries[msg.sender][id];
+        if (makerLocked == 0) return;
 
+        uint256 baseline = lockedBaselineAtSettle[id];
+        // If baseline is 0 (shouldn't happen if there were mints), fall back to makerLocked to avoid div by zero.
+        if (baseline == 0) baseline = makerLocked;
+
+        uint256 share = 0;
+        if (totalExerciseOut[id] > 0) {
+            share = (totalExerciseOut[id] * makerLocked) / baseline;
+            if (share > makerLocked) share = makerLocked; // clamp
+        }
+
+        uint256 reclaimable = makerLocked - share;
+
+        // state updates
         lockedPerSeries[msg.sender][id] = 0;
-        totalLocked[msg.sender] -= locked;
+        totalLocked[msg.sender] -= makerLocked;
 
-        UNDERLYING.safeTransfer(msg.sender, locked);
-        emit Reclaimed(msg.sender, id, locked);
+        // live aggregate (for info only)
+        if (totalLockedBySeries[id] >= makerLocked) {
+            totalLockedBySeries[id] -= makerLocked;
+        } else {
+            totalLockedBySeries[id] = 0;
+        }
+
+        if (reclaimable > 0) {
+            UNDERLYING.safeTransfer(msg.sender, reclaimable);
+        }
+
+        emit ReclaimCalculated(
+            msg.sender,
+            id,
+            makerLocked,
+            share,
+            reclaimable,
+            totalLockedBySeries[id]
+        );
+
+        emit Reclaimed(msg.sender, id, reclaimable);
+    }
+
+    // ------------------ Views ------------------
+
+    function exerciseShareOf(address maker, uint256 id) public view returns (uint256) {
+        uint256 makerLocked = lockedPerSeries[maker][id];
+        if (makerLocked == 0) return 0;
+        uint256 baseline = lockedBaselineAtSettle[id];
+        if (baseline == 0) return 0;
+        uint256 out = totalExerciseOut[id];
+        if (out == 0) return 0;
+
+        uint256 share = (out * makerLocked) / baseline;
+        if (share > makerLocked) share = makerLocked;
+        return share;
+    }
+
+    function reclaimableOf(address maker, uint256 id) external view returns (uint256 reclaimable, uint256 share) {
+        uint256 makerLocked = lockedPerSeries[maker][id];
+        if (makerLocked == 0) return (0, 0);
+        share = exerciseShareOf(maker, id);
+        reclaimable = makerLocked - share;
     }
 
     // ------------------ Admin ------------------

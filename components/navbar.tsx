@@ -1,3 +1,4 @@
+// components/navbar.tsx
 "use client";
 
 import {
@@ -29,11 +30,24 @@ export const Navbar = () => {
         </NavbarBrand>
       </NavbarContent>
 
-      {/* Center/Right: Desktop nav and actions */}
+      {/* Right: Desktop nav and actions */}
       <NavbarContent justify="end" className="hidden sm:flex items-center gap-4">
         <NavbarItem>
-          <NextLink href="/how-it-works" className="text-default-600 hover:text-foreground transition">
+          <NextLink
+            href="/how-it-works"
+            className="text-default-600 hover:text-foreground transition"
+          >
             How it works
+          </NextLink>
+        </NavbarItem>
+
+        {/* Always-visible admin link */}
+        <NavbarItem>
+          <NextLink
+            href="/admin/"
+            className="text-default-600 hover:text-foreground transition"
+          >
+            Admin: Define Series
           </NextLink>
         </NavbarItem>
 
@@ -66,7 +80,7 @@ export const Navbar = () => {
         <NavbarMenuToggle />
       </NavbarContent>
 
-      {/* Mobile menu content */}
+      {/* Mobile menu */}
       <NavbarMenu>
         <div className="mx-4 my-4 space-y-3">
           <NavbarMenuItem>
@@ -75,17 +89,23 @@ export const Navbar = () => {
             </Link>
           </NavbarMenuItem>
 
+          {/* Always-visible admin link */}
+          <NavbarMenuItem>
+            <Link as={NextLink} href="/admin" size="lg">
+              Admin
+            </Link>
+          </NavbarMenuItem>
+
+          <NavbarMenuItem>
+            <Link isExternal href={siteConfig.links.github} size="lg">
+              Open GitHub
+            </Link>
+          </NavbarMenuItem>
         </div>
 
         <div className="mx-4 my-2">
           <ConnectButton showBalance={false} accountStatus="avatar" chainStatus="icon" />
         </div>
-
-        <NavbarMenuItem>
-          <Link isExternal href={siteConfig.links.github} size="lg">
-            Open GitHub
-          </Link>
-        </NavbarMenuItem>
       </NavbarMenu>
     </HeroUINavbar>
   );

@@ -9,14 +9,18 @@
     "lint": "eslint --fix"
   },
   "dependencies": {
+    "@1inch/limit-order-sdk": "^4.9.5-rc.0",
     "@heroui/button": "2.2.23",
+    "@heroui/card": "^2.2.22",
     "@heroui/code": "2.2.17",
     "@heroui/input": "2.4.24",
     "@heroui/kbd": "2.2.18",
     "@heroui/link": "2.2.20",
     "@heroui/listbox": "2.3.22",
     "@heroui/navbar": "2.2.21",
+    "@heroui/select": "^2.4.24",
     "@heroui/snippet": "2.2.24",
+    "@heroui/spacer": "^2.2.17",
     "@heroui/switch": "2.2.21",
     "@heroui/system": "2.4.19",
     "@heroui/theme": "2.4.19",
@@ -24,6 +28,7 @@
     "@react-aria/ssr": "3.9.9",
     "@react-aria/visually-hidden": "3.8.25",
     "@tanstack/react-query": "^5.83.0",
+    "axios": "^1.11.0",
     "clsx": "2.1.1",
     "framer-motion": "11.18.2",
     "intl-messageformat": "10.7.16",
@@ -32,7 +37,8 @@
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "viem": "^2.33.1",
-    "wagmi": "^2.16.0"
+    "wagmi": "^2.16.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@next/eslint-plugin-next": "15.3.4",

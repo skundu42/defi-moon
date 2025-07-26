@@ -1,55 +1,65 @@
+// app/vault/page.tsx
+"use client";
+
 import { Link } from "@heroui/link";
-import { Snippet } from "@heroui/snippet";
-import { Code } from "@heroui/code";
 import { button as buttonStyles } from "@heroui/theme";
 
-import { siteConfig } from "@/config/site";
-import { title, subtitle } from "@/components/primitives";
-import { GithubIcon } from "@/components/icons";
+import DefineSeriesForm from "../components/DefineSeriesForm";
+import DepositWithdraw from "../components/DepositWithdraw";
+import MintOptionsForm from "../components/MintOptionsForm";
+import CreateLimitOrder from "../components/CreateLimitOrder";
+import SettleExerciseReclaim from "../components/SettleExerciseReclaim";
+import SeriesTable from "../components/SeriesTable";
 
-export default function Home() {
+export default function VaultPage() {
   return (
-    <section className="flex flex-col items-center justify-center gap-4 py-8 md:py-10">
-      <div className="inline-block max-w-xl text-center justify-center">
-        <span className={title()}>Make&nbsp;</span>
-        <span className={title({ color: "violet" })}>beautiful&nbsp;</span>
-        <br />
-        <span className={title()}>
-          websites regardless of your design experience.
-        </span>
-        <div className={subtitle({ class: "mt-4" })}>
-          Beautiful, fast and modern React UI library.
+    <section className="mx-auto max-w-5xl py-8 md:py-12 space-y-8">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Covered Call Vault — Gnosis</h1>
+          <p className="text-default-500 mt-1">
+            Define series, manage collateral, mint options, create 1inch orders, and settle/exercise.
+          </p>
         </div>
-      </div>
 
-      <div className="flex gap-3">
         <Link
-          isExternal
-          className={buttonStyles({
-            color: "primary",
-            radius: "full",
-            variant: "shadow",
-          })}
-          href={siteConfig.links.docs}
-        >
-          Documentation
-        </Link>
-        <Link
-          isExternal
+          href="/"
           className={buttonStyles({ variant: "bordered", radius: "full" })}
-          href={siteConfig.links.github}
         >
-          <GithubIcon size={20} />
-          GitHub
+          Home
         </Link>
       </div>
 
-      <div className="mt-8">
-        <Snippet hideCopyButton hideSymbol variant="bordered">
-          <span>
-            Get started by editing <Code color="primary">app/page.tsx</Code>
-          </span>
-        </Snippet>
+      {/* “Cards” using Tailwind containers to avoid installing extra component packages */}
+      <div className="grid grid-cols-1 gap-6">
+        <div className="rounded-2xl border border-default-200/50 bg-content1 p-5">
+          <h2 className="text-lg font-medium mb-3">Define Series</h2>
+          <DefineSeriesForm />
+          <div className="mt-6">
+            <SeriesTable />
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-default-200/50 bg-content1 p-5">
+          <h2 className="text-lg font-medium mb-3">Collateral</h2>
+          <DepositWithdraw />
+        </div>
+
+        <div className="rounded-2xl border border-default-200/50 bg-content1 p-5">
+          <h2 className="text-lg font-medium mb-3">Mint Options</h2>
+          <MintOptionsForm />
+        </div>
+
+        <div className="rounded-2xl border border-default-200/50 bg-content1 p-5">
+          <h2 className="text-lg font-medium mb-3">Create 1inch Order</h2>
+          <CreateLimitOrder />
+        </div>
+
+        <div className="rounded-2xl border border-default-200/50 bg-content1 p-5">
+          <h2 className="text-lg font-medium mb-3">Settle / Exercise / Reclaim</h2>
+          <SettleExerciseReclaim />
+        </div>
       </div>
     </section>
   );

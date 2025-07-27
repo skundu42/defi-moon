@@ -3,10 +3,15 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Card } from "@heroui/card";
+import { Button } from "@heroui/button";
 import { VAULT_ADDRESS, vaultAbi } from "@/lib/contracts";
 import { ALL_TOKENS } from "@/lib/token";
 import { parseAbiItem } from "viem";
-import { usePublicClient, useWatchContractEvent } from "wagmi";
+import {
+  usePublicClient,
+  useWatchContractEvent,
+} from "wagmi";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 /** event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry); */
 const SERIES_DEFINED = parseAbiItem(
@@ -27,8 +32,8 @@ function symFromAddress(addr: string): string {
   return t ? t.symbol : addr.slice(0, 6) + "…" + addr.slice(-4);
 }
 
+// 1e18 -> human
 function formatStrikeWXDAI(n: bigint): string {
-  // 1e18 -> human
   const s = n.toString().padStart(19, "0");
   const head = s.slice(0, -18) || "0";
   const tail = s.slice(-18).replace(/0+$/, "");
@@ -37,14 +42,23 @@ function formatStrikeWXDAI(n: bigint): string {
 
 function formatDate(ts: bigint): string {
   const d = new Date(Number(ts) * 1000);
-  return isNaN(d.getTime()) ? "-" : d.toISOString().replace("T", " ").slice(0, 16) + "Z";
+  return isNaN(d.getTime())
+    ? "-"
+    : d.toISOString().replace("T", " ").slice(0, 16) + "Z";
 }
 
 export default function SeriesTable() {
   const client = usePublicClient();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
   const bootstrappedRef = useRef(false);
+
+  // Currently selected series id (string for easier URL/localStorage handling)
+  const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
 
   const deployBlockEnv = useMemo(() => {
     const v = process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK;
@@ -137,9 +151,112 @@ export default function SeriesTable() {
     [rows, nowSec]
   );
 
+  // ---- Initialize selection from URL or localStorage or default to first active ----
+  useEffect(() => {
+    // If URL already has seriesId, prefer it
+    const fromUrl = searchParams?.get("seriesId");
+    if (fromUrl && fromUrl !== selectedId) {
+      setSelectedId(fromUrl);
+      // also cache to localStorage for persistence across pages
+      try {
+        localStorage.setItem("selectedSeriesId", fromUrl);
+      } catch {}
+      return;
+    }
+
+    // Else try localStorage
+    if (!fromUrl && typeof window !== "undefined" && !selectedId) {
+      try {
+        const fromStorage = localStorage.getItem("selectedSeriesId") || undefined;
+        if (fromStorage) {
+          setSelectedId(fromStorage);
+          // keep URL in sync (no navigation away, just replace)
+          const params = new URLSearchParams(searchParams?.toString());
+          params.set("seriesId", fromStorage);
+          router.replace(`${pathname}?${params.toString()}`);
+          return;
+        }
+      } catch {}
+    }
+
+    // Else pick a default if any active rows exist and we still don't have a selection
+    if (!selectedId && activeRows.length > 0) {
+      const defaultId = activeRows[0].id.toString(); // choose the first active (newest expiry by our sort)
+      setSelectedId(defaultId);
+      try {
+        localStorage.setItem("selectedSeriesId", defaultId);
+      } catch {}
+      const params = new URLSearchParams(searchParams?.toString());
+      params.set("seriesId", defaultId);
+      router.replace(`${pathname}?${params.toString()}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, activeRows.length, pathname, router]);
+
+  // ---- If selection expires or becomes invalid, clear it and choose a new default ----
+  useEffect(() => {
+    if (!selectedId) return;
+    const stillActive = activeRows.some((r) => r.id.toString() === selectedId);
+    if (!stillActive) {
+      // clear selection and try to choose the next best
+      const next = activeRows[0]?.id?.toString();
+      setSelectedId(next);
+      try {
+        if (next) localStorage.setItem("selectedSeriesId", next);
+        else localStorage.removeItem("selectedSeriesId");
+      } catch {}
+      const params = new URLSearchParams(searchParams?.toString());
+      if (next) {
+        params.set("seriesId", next);
+      } else {
+        params.delete("seriesId");
+      }
+      router.replace(`${pathname}?${params.toString()}`);
+    }
+  }, [activeRows, selectedId, pathname, router, searchParams]);
+
+  // ---- Select handler: update state + URL + localStorage (+ fire a window event for immediate listeners) ----
+  function selectSeries(id: string) {
+    if (!id || id === selectedId) return;
+    setSelectedId(id);
+    try {
+      localStorage.setItem("selectedSeriesId", id);
+    } catch {}
+    const params = new URLSearchParams(searchParams?.toString());
+    params.set("seriesId", id);
+    router.replace(`${pathname}?${params.toString()}`);
+
+    // optional: broadcast for any listeners that want to react immediately
+    try {
+      window.dispatchEvent(new CustomEvent("series:selected", { detail: id }));
+    } catch {}
+  }
+
+  const selectedRow = useMemo(
+    () => activeRows.find((r) => r.id.toString() === selectedId),
+    [activeRows, selectedId]
+  );
+
   return (
-    <Card className="p-5">
-      <h3 className="text-lg font-medium mb-3">Active Series</h3>
+    <Card className="p-5 space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-medium">Active Series</h3>
+
+        {/* Current selection summary */}
+        <div className="text-xs md:text-sm rounded-xl border border-default-200/60 bg-content2 px-3 py-1.5">
+          {selectedRow ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">Selected:</span>
+              <span className="font-mono">{selectedRow.id.toString()}</span>
+              <span>• {symFromAddress(selectedRow.underlying)}</span>
+              <span>• K {formatStrikeWXDAI(selectedRow.strike)}</span>
+              <span>• exp {formatDate(selectedRow.expiry)}</span>
+            </div>
+          ) : (
+            <span className="text-default-500">No series selected</span>
+          )}
+        </div>
+      </div>
 
       {loading && activeRows.length === 0 ? (
         <div className="rounded-xl border border-default-200/50 bg-content2 p-3 text-sm text-foreground/70">
@@ -154,21 +271,55 @@ export default function SeriesTable() {
           <table className="min-w-full text-sm">
             <thead className="text-default-500">
               <tr>
+                <th className="text-left p-2">Select</th>
                 <th className="text-left p-2">SeriesId</th>
                 <th className="text-left p-2">Underlying</th>
                 <th className="text-left p-2">Strike (WXDAI)</th>
                 <th className="text-left p-2">Expiry (UTC)</th>
+                <th className="text-left p-2"></th>
               </tr>
             </thead>
             <tbody>
-              {activeRows.map((r) => (
-                <tr key={r.id.toString()} className="border-t border-default-200/50">
-                  <td className="p-2 font-mono">{r.id.toString()}</td>
-                  <td className="p-2">{symFromAddress(r.underlying)}</td>
-                  <td className="p-2">{formatStrikeWXDAI(r.strike)}</td>
-                  <td className="p-2">{formatDate(r.expiry)}</td>
-                </tr>
-              ))}
+              {activeRows.map((r) => {
+                const idStr = r.id.toString();
+                const isSelected = idStr === selectedId;
+                return (
+                  <tr
+                    key={idStr}
+                    className={`border-t border-default-200/50 ${
+                      isSelected ? "bg-content1/40" : ""
+                    }`}
+                  >
+                    <td className="p-2 align-middle">
+                      <input
+                        type="radio"
+                        name="series-select"
+                        className="cursor-pointer"
+                        checked={isSelected}
+                        onChange={() => selectSeries(idStr)}
+                        aria-label={`Select series ${idStr}`}
+                      />
+                    </td>
+                    <td className="p-2 font-mono align-middle">{idStr}</td>
+                    <td className="p-2 align-middle">{symFromAddress(r.underlying)}</td>
+                    <td className="p-2 align-middle">{formatStrikeWXDAI(r.strike)}</td>
+                    <td className="p-2 align-middle">{formatDate(r.expiry)}</td>
+                    <td className="p-2 align-middle">
+                      {!isSelected ? (
+                        <Button
+                          size="sm"
+                          onPress={() => selectSeries(idStr)}
+                          className="h-8"
+                        >
+                          Select
+                        </Button>
+                      ) : (
+                        <span className="text-xs text-success">Selected</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

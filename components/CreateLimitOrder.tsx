@@ -1,4 +1,3 @@
-// components/CreateLimitOrder.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -64,6 +63,8 @@ const SERIES_DEFINED = parseAbiItem(
 const DEPLOY_FROM = process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK
   ? BigInt(process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK)
   : undefined;
+
+const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 
 function symFromAddress(addr: string): string {
   const t = ALL_TOKENS.find(
@@ -230,22 +231,11 @@ export default function CreateLimitOrder() {
     wrap,
   } = useOptionWrapper(selectedSeriesId);
 
-  // Ensure ERC-20 exists when a series is selected
-  useEffect(() => {
-    (async () => {
-      if (!mounted) return;
-      if (!selectedSeriesId) return;
-      if (erc20Address && erc20Address !== "0x0000000000000000000000000000000000000000") return;
-      try {
-        await ensureSeriesERC20(
-          `WrappedCall-${selectedSeriesId}`,
-          `wCALL-${selectedSeriesId.toString().slice(0, 6)}`
-        );
-      } catch {
-        // ok if exists already or user cancels
-      }
-    })();
-  }, [mounted, selectedSeriesId, erc20Address, ensureSeriesERC20]);
+  // NO automatic wrapper creation here. User must click a button.
+  const needsWrapper = useMemo(
+    () => !erc20Address || erc20Address === ZERO_ADDR,
+    [erc20Address]
+  );
 
   // ------------------ Taker token dropdown ------------------
   const defaultTaker =
@@ -290,33 +280,69 @@ export default function CreateLimitOrder() {
   }, [makingAmount, takingAmount, takerToken]);
 
   // ------------------ Actions ------------------
+  const handleEnsureWrapper = async () => {
+    if (!selectedSeriesId) {
+      alert("Select an active series first.");
+      return;
+    }
+    try {
+      await ensureSeriesERC20(
+        `WrappedCall-${selectedSeriesId}`,
+        `wCALL-${selectedSeriesId.toString().slice(0, 6)}`
+      );
+      // no auto-refetch needed; hook should expose updated address on next read cycle
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.shortMessage ?? e?.message ?? "Failed to create ERC-20 wrapper");
+    }
+  };
+
+  const handleApprove1155Operator = async () => {
+    try {
+      await setApprovalForAll(true);
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.shortMessage ?? e?.message ?? "Approval failed");
+    }
+  };
+
   const doWrap = async () => {
     if (!selectedSeriesId) return alert("Select an active series.");
     const qty = Number(wrapQty || "0");
     if (!Number.isFinite(qty) || qty <= 0) return alert("Enter wrap qty");
-    if (!isApprovedForAll) {
-      await setApprovalForAll(true);
+    if (needsWrapper) return alert("Create the ERC-20 wrapper first.");
+    if (!isApprovedForAll) return alert("Please approve the 1155 operator first.");
+    try {
+      await wrap(BigInt(qty));
+      setWrapQty("");
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.shortMessage ?? e?.message ?? "Wrap failed");
     }
-    await wrap(BigInt(qty));
   };
 
   const valid = useMemo(() => {
     if (!address || !erc20Address || !takerToken) return false;
     if (!makingAmount || !takingAmount) return false;
     if (!selectedSeriesId) return false;
+    if (needsWrapper) return false;
     return true;
-  }, [address, erc20Address, takerToken, makingAmount, takingAmount, selectedSeriesId]);
+  }, [address, erc20Address, takerToken, makingAmount, takingAmount, selectedSeriesId, needsWrapper]);
 
   const handleSubmit = async () => {
     if (!address || !erc20Address || !takerToken || !selectedSeriesId) return;
+    if (needsWrapper) {
+      alert("Create the ERC-20 wrapper for this series first.");
+      return;
+    }
 
     const making = parseUnits(makingAmount, makerDecimals20 ?? 18);
     const taking = parseUnits(takingAmount, takerToken.decimals);
 
-    // Ensure allowance
+    // Do NOT auto-approve: require explicit user action.
     if (!hasEnough?.(making)) {
-      await approve();
-      await refetchAllowance();
+      alert("Insufficient allowance. Click 'Approve 1inch (maker)' first, then submit again.");
+      return;
     }
 
     setSubmitting(true);
@@ -367,7 +393,7 @@ export default function CreateLimitOrder() {
       {/* Row 0: Active Series Selector */}
       <div className="rounded-2xl border border-default-200/50 bg-content1 p-4 mb-4">
         <div className="grid grid-cols-12 gap-3 items-end">
-          <div className="col-span-12 md:col-span-6">
+          <div className="col-span-12 md:col-span-8">
             <label className="block mb-1 text-sm font-medium">
               Active Series{" "}
               <Info tip="Choose an unexpired option series. Expired series are hidden here." />
@@ -386,7 +412,7 @@ export default function CreateLimitOrder() {
                     : new Set()
                 }
                 onSelectionChange={(keys) => {
-                  const raw = Array.from(keys)[0] as string | undefined;
+                  const raw = Array.from(keys as Set<React.Key>)[0] as string | undefined;
                   if (!raw) {
                     setSelectedSeriesId(undefined);
                   } else {
@@ -425,10 +451,18 @@ export default function CreateLimitOrder() {
             )}
           </div>
 
-          <div className="col-span-12 md:col-span-6">
-            {!seriesLoading && activeSeries.length === 0 && (
-              <div className="rounded-xl border border-default-200/50 bg-content2 p-3 text-sm text-foreground/70">
-                No active series found. Define a new series (admin) or wait for a new one.
+          <div className="col-span-12 md:col-span-4 flex gap-2 md:justify-end">
+            {needsWrapper ? (
+              <Button
+                onPress={handleEnsureWrapper}
+                isDisabled={!mounted || !selectedSeriesId}
+                className="h-12"
+              >
+                Create Series ERC-20
+              </Button>
+            ) : (
+              <div className="text-sm text-success self-end mb-1">
+                ERC-20 wrapper ready.
               </div>
             )}
           </div>
@@ -438,18 +472,6 @@ export default function CreateLimitOrder() {
       {/* Row 1: Series + Wrap */}
       <div className="rounded-2xl border border-default-200/50 bg-content1 p-4 mb-4">
         <div className="grid grid-cols-12 gap-3 items-end">
-          <div className="col-span-12 md:col-span-3">
-            <label className="block mb-1 text-sm font-medium">
-              SeriesId <Info tip="The selected active series ID." />
-            </label>
-            <Input
-              isReadOnly
-              value={mounted ? (selectedSeriesId?.toString() ?? "") : ""}
-              placeholder="Select an active series"
-              classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
-            />
-          </div>
-
           <div className="col-span-6 md:col-span-2">
             <label className="block mb-1 text-sm font-medium">
               1155 Balance (options){" "}
@@ -462,7 +484,7 @@ export default function CreateLimitOrder() {
             />
           </div>
 
-          <div className="col-span-6 md:col-span-3">
+          <div className="col-span-6 md:col-span-4">
             <label className="block mb-1 text-sm font-medium">
               Series ERC20 <Info tip="ERC-20 wrapper token address for this series." />
             </label>
@@ -485,26 +507,24 @@ export default function CreateLimitOrder() {
             />
           </div>
 
-          <div className="col-span-6 md:col-span-2 flex md:justify-end">
+          <div className="col-span-6 md:col-span-4 flex gap-2 md:justify-end">
+            {!isApprovedForAll && (
+              <Button
+                variant="bordered"
+                className="h-12"
+                onPress={handleApprove1155Operator}
+                isDisabled={!mounted || !selectedSeriesId}
+              >
+                Approve 1155 Operator
+              </Button>
+            )}
             <Button
               onPress={doWrap}
-              isDisabled={!mounted || !selectedSeriesId}
+              isDisabled={!mounted || !selectedSeriesId || needsWrapper}
               className="h-12"
             >
               Wrap
             </Button>
-          </div>
-
-          <div className="col-span-12 md:col-span-2">
-            <label className="block mb-1 text-sm font-medium">
-              ERC20 Balance (options) {mounted ? `(${makerSymbol20})` : ""}{" "}
-              <Info tip="Wrapped options balance. 1 option = 1e18 units." />
-            </label>
-            <Input
-              isReadOnly
-              value={mounted ? makerBalanceOptions : "0"}
-              classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
-            />
           </div>
         </div>
       </div>
@@ -554,7 +574,7 @@ export default function CreateLimitOrder() {
                 defaultSelectedKeys={defaultTaker ? new Set([defaultTaker]) : undefined}
                 selectedKeys={mounted && takerSym ? new Set([takerSym]) : undefined}
                 onSelectionChange={(keys) => {
-                  const next = Array.from(keys)[0] as string | undefined;
+                  const next = Array.from(keys as Set<React.Key>)[0] as string | undefined;
                   setTakerSym(next);
                 }}
                 classNames={{
@@ -613,18 +633,10 @@ export default function CreateLimitOrder() {
       <Spacer y={3} />
 
       {/* Actions */}
-      <div className="flex gap-3">
-        <Button
-          color="primary"
-          isDisabled={!mounted || !valid || submitting}
-          isLoading={submitting}
-          onPress={handleSubmit}
-        >
-          {submitting ? "Submitting..." : "Create Order"}
-        </Button>
+      <div className="flex flex-wrap gap-3">
         <Button
           variant="bordered"
-          isDisabled={!mounted || !erc20Address}
+          isDisabled={!mounted || !erc20Address || needsWrapper}
           isLoading={isApproving}
           onPress={async () => {
             await approve();
@@ -632,6 +644,14 @@ export default function CreateLimitOrder() {
           }}
         >
           Approve 1inch (maker)
+        </Button>
+        <Button
+          color="primary"
+          isDisabled={!mounted || !valid || submitting}
+          isLoading={submitting}
+          onPress={handleSubmit}
+        >
+          {submitting ? "Submitting..." : "Create Order"}
         </Button>
       </div>
 

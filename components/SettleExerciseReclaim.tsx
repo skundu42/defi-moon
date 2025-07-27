@@ -24,25 +24,42 @@ import {
 
 const EXPECTED_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? "100");
 
-function isHex(s: string) {
-  return /^0x[0-9a-fA-F]+$/.test(s.trim());
-}
-function parseSeriesId(input: string): bigint | null {
-  const s = (input || "").trim();
-  if (!s) return null;
-  try {
-    if (isHex(s)) return BigInt(s);
-    // decimal
-    if (!/^\d+$/.test(s)) return null;
-    return BigInt(s);
-  } catch {
-    return null;
-  }
-}
-
 function fmt18(bi?: bigint, max = 6) {
   const n = Number(formatUnits(bi ?? 0n, 18));
   return n.toLocaleString(undefined, { maximumFractionDigits: max });
+}
+
+/** Shared: read selected series id from URL/localStorage and window event */
+function useSelectedSeriesId(): bigint | undefined {
+  const [id, setId] = useState<bigint | undefined>(undefined);
+
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      const raw = url.searchParams.get("seriesId");
+      if (raw) {
+        setId(BigInt(raw));
+        return;
+      }
+    } catch {}
+    try {
+      const raw = localStorage.getItem("selectedSeriesId");
+      if (raw) setId(BigInt(raw));
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      try {
+        const detail = (e as CustomEvent<string>).detail;
+        if (detail) setId(BigInt(detail));
+      } catch {}
+    };
+    window.addEventListener("series:selected", handler as EventListener);
+    return () => window.removeEventListener("series:selected", handler as EventListener);
+  }, []);
+
+  return id;
 }
 
 export default function SettleExerciseReclaim() {
@@ -50,23 +67,22 @@ export default function SettleExerciseReclaim() {
   const chainId = useWagmiChainId();
   const publicClient = usePublicClient();
 
+  const selectedSeriesId = useSelectedSeriesId();
+
   // SSR guard
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  // Inputs
-  const [seriesIdStr, setSeriesIdStr] = useState<string>("");
+  // Exercise input
   const [exerciseQtyStr, setExerciseQtyStr] = useState<string>("");
-
-  const seriesId = useMemo(() => parseSeriesId(seriesIdStr), [seriesIdStr]);
 
   // Reads — series struct
   const { data: seriesData } = useReadContract({
     address: VAULT_ADDRESS,
     abi: vaultAbi,
     functionName: "series",
-    args: seriesId ? [seriesId] : undefined,
-    query: { enabled: Boolean(seriesId) },
+    args: selectedSeriesId ? [selectedSeriesId] : undefined,
+    query: { enabled: Boolean(selectedSeriesId) },
   });
   // series() layout: [underlying, underlyingDecimals, strike, expiry, collateralPerOption, oracle, settled]
   const expirySec: bigint | undefined = seriesData ? (seriesData as any)[3] : undefined;
@@ -77,8 +93,8 @@ export default function SettleExerciseReclaim() {
     address: VAULT_ADDRESS,
     abi: vaultAbi,
     functionName: "settlePrice",
-    args: seriesId ? [seriesId] : undefined,
-    query: { enabled: Boolean(seriesId) },
+    args: selectedSeriesId ? [selectedSeriesId] : undefined,
+    query: { enabled: Boolean(selectedSeriesId) },
   });
 
   // User 1155 balance of this series (needed for exercise)
@@ -86,8 +102,8 @@ export default function SettleExerciseReclaim() {
     address: CALLTOKEN_ADDRESS as Address,
     abi: erc1155Abi,
     functionName: "balanceOf",
-    args: seriesId && address ? [address as Address, seriesId] : undefined,
-    query: { enabled: Boolean(seriesId && address) },
+    args: selectedSeriesId && address ? [address as Address, selectedSeriesId] : undefined,
+    query: { enabled: Boolean(selectedSeriesId && address) },
   });
 
   // User locked collateral in this series (for reclaim)
@@ -95,8 +111,8 @@ export default function SettleExerciseReclaim() {
     address: VAULT_ADDRESS,
     abi: vaultAbi,
     functionName: "lockedPerSeries",
-    args: seriesId && address ? [address as Address, seriesId] : undefined,
-    query: { enabled: Boolean(seriesId && address) },
+    args: selectedSeriesId && address ? [address as Address, selectedSeriesId] : undefined,
+    query: { enabled: Boolean(selectedSeriesId && address) },
   });
 
   const nowSec = Math.floor(Date.now() / 1000);
@@ -104,7 +120,7 @@ export default function SettleExerciseReclaim() {
 
   // Exercise qty parsing (ERC-1155 = whole units)
   const exerciseQty = useMemo(() => {
-    const s = exerciseQtyStr.trim();
+    const s = (exerciseQtyStr || "").trim();
     if (!s) return 0n;
     if (!/^\d+$/.test(s)) return 0n;
     try {
@@ -115,9 +131,9 @@ export default function SettleExerciseReclaim() {
   }, [exerciseQtyStr]);
 
   // Status helpers
-  const canSettle = Boolean(seriesId && expired && !settled);
-  const canExercise = Boolean(seriesId && settled && bal1155 > 0n && exerciseQty > 0n && exerciseQty <= bal1155);
-  const canReclaim = Boolean(seriesId && settled && locked > 0n);
+  const canSettle = Boolean(selectedSeriesId && expired && !settled);
+  const canExercise = Boolean(selectedSeriesId && settled && bal1155 > 0n && exerciseQty > 0n && exerciseQty <= bal1155);
+  const canReclaim = Boolean(selectedSeriesId && settled && locked > 0n);
 
   // Actions
   const { writeContractAsync, isPending } = useWriteContract();
@@ -128,9 +144,7 @@ export default function SettleExerciseReclaim() {
     if (!publicClient) return;
     try {
       await publicClient.waitForTransactionReceipt({ hash });
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   async function refreshReads() {
@@ -143,8 +157,8 @@ export default function SettleExerciseReclaim() {
       setMsg({ type: "warn", text: "Connect your wallet." });
       return false;
     }
-    if (!seriesId) {
-      setMsg({ type: "warn", text: "Enter a valid seriesId (decimal or 0x hex)." });
+    if (!selectedSeriesId) {
+      setMsg({ type: "warn", text: "Select a series in the Series section first." });
       return false;
     }
     if (chainId !== EXPECTED_CHAIN_ID) {
@@ -167,7 +181,7 @@ export default function SettleExerciseReclaim() {
         address: VAULT_ADDRESS,
         abi: vaultAbi,
         functionName: "settleSeries",
-        args: [seriesId as bigint],
+        args: [selectedSeriesId as bigint],
       });
       if (typeof hash === "string" && hash.startsWith("0x")) {
         await waitReceipt(hash as `0x${string}`);
@@ -194,7 +208,7 @@ export default function SettleExerciseReclaim() {
         address: VAULT_ADDRESS,
         abi: vaultAbi,
         functionName: "exercise",
-        args: [seriesId as bigint, exerciseQty],
+        args: [selectedSeriesId as bigint, exerciseQty],
       });
       if (typeof hash === "string" && hash.startsWith("0x")) {
         await waitReceipt(hash as `0x${string}`);
@@ -222,7 +236,7 @@ export default function SettleExerciseReclaim() {
         address: VAULT_ADDRESS,
         abi: vaultAbi,
         functionName: "reclaim",
-        args: [seriesId as bigint],
+        args: [selectedSeriesId as bigint],
       });
       if (typeof hash === "string" && hash.startsWith("0x")) {
         await waitReceipt(hash as `0x${string}`);
@@ -246,19 +260,37 @@ export default function SettleExerciseReclaim() {
     <Card className="p-5 space-y-4">
       <h3 className="text-lg font-medium">Settle / Exercise / Reclaim</h3>
 
-      {/* Row: inputs */}
+      {/* Selected series summary */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div>
+          <div className="text-sm text-default-500">SeriesId</div>
+          <div className="text-xl font-semibold">
+            {selectedSeriesId ? <span className="font-mono">{selectedSeriesId.toString()}</span> : "— Select a series"}
+          </div>
+        </div>
+        <div>
+          <div className="text-sm text-default-500">Expiry (UTC)</div>
+          <div className="text-xl font-semibold">{expiryLabel}</div>
+          <div className="text-xs mt-1">
+            {expirySec === undefined ? "—" : expired ? "Expired" : "Not expired"}
+          </div>
+        </div>
+        <div>
+          <div className="text-sm text-default-500">Settled</div>
+          <div className={`text-xl font-semibold ${settled ? "text-success" : "text-warning"}`}>
+            {settled ? "Yes" : "No"}
+          </div>
+          {settled && (
+            <div className="text-xs mt-1">
+              Settle Px: {fmt18(settlePx)} WXDAI
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Exercise input */}
       <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
         <div className="md:col-span-3">
-          <label className="block mb-1 text-sm font-medium">SeriesId (decimal or 0x hex)</label>
-          <Input
-            placeholder="e.g. 123456789... or 0xabc..."
-            value={seriesIdStr}
-            onChange={(e) => setSeriesIdStr(e.target.value)}
-            classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
-          />
-        </div>
-
-        <div className="md:col-span-2">
           <label className="block mb-1 text-sm font-medium">Exercise Qty (options)</label>
           <Input
             placeholder="0"
@@ -273,19 +305,20 @@ export default function SettleExerciseReclaim() {
                 type="button"
                 className="text-xs text-primary"
                 onClick={() => setExerciseQtyStr(bal1155.toString())}
-                disabled={!seriesId || bal1155 === 0n}
+                disabled={!selectedSeriesId || bal1155 === 0n}
               >
                 Max
               </button>
             }
           />
+          <div className="text-xs text-default-500 mt-1">Your 1155 balance: {bal1155.toString()}</div>
         </div>
 
         <div className="md:col-span-1 flex gap-2">
           <Button
             color="primary"
             onPress={onSettle}
-            isDisabled={!mounted || !seriesId || sending || !canSettle}
+            isDisabled={!mounted || !selectedSeriesId || sending || !canSettle}
             isLoading={sending && canSettle}
             className="h-12 flex-1"
           >
@@ -297,7 +330,7 @@ export default function SettleExerciseReclaim() {
           <Button
             variant="flat"
             onPress={onExercise}
-            isDisabled={!mounted || !seriesId || sending || !canExercise}
+            isDisabled={!mounted || !selectedSeriesId || sending || !canExercise}
             isLoading={sending && canExercise}
             className="h-12 flex-1"
           >
@@ -309,52 +342,13 @@ export default function SettleExerciseReclaim() {
           <Button
             variant="bordered"
             onPress={onReclaim}
-            isDisabled={!mounted || !seriesId || sending || !canReclaim}
+            isDisabled={!mounted || !selectedSeriesId || sending || !canReclaim}
             isLoading={sending && canReclaim}
             className="h-12 flex-1"
           >
             Reclaim
           </Button>
         </div>
-      </div>
-
-      {/* Status */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-        <Card className="p-4">
-          <div className="text-sm text-default-500">Expiry (UTC)</div>
-          <div className="text-xl font-semibold">{expiryLabel}</div>
-          <div className="text-xs mt-1">
-            {expired === undefined ? "—" : expired ? "Expired" : "Not expired"}
-          </div>
-        </Card>
-
-        <Card className="p-4">
-          <div className="text-sm text-default-500">Settled</div>
-          <div className={`text-xl font-semibold ${settled ? "text-success" : "text-warning"}`}>
-            {settled ? "Yes" : "No"}
-          </div>
-          {settled && (
-            <div className="text-xs mt-1">
-              Settle Px: {fmt18(settlePx)} WXDAI
-            </div>
-          )}
-        </Card>
-
-        <Card className="p-4">
-          <div className="text-sm text-default-500">Your 1155 balance (options)</div>
-          <div className="text-xl font-semibold">{bal1155.toString()}</div>
-          <div className="text-xs mt-1">
-            {bal1155 > 0n ? "You can exercise after settlement." : "No options held."}
-          </div>
-        </Card>
-
-        <Card className="p-4">
-          <div className="text-sm text-default-500">Your locked collateral</div>
-          <div className="text-xl font-semibold">{fmt18(locked)} GNO</div>
-          <div className="text-xs mt-1">
-            {settled ? "Reclaim available if > 0." : "Reclaim only after settlement."}
-          </div>
-        </Card>
       </div>
 
       {/* Messages */}

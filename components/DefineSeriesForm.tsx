@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
-import { parseUnits } from "viem";
-import { useWriteContract } from "wagmi";
+import { parseUnits, parseAbiItem, decodeEventLog } from "viem";
+import { usePublicClient, useWriteContract } from "wagmi";
 
 import { Card } from "@heroui/card";
 import { Input } from "@heroui/input";
@@ -32,8 +32,16 @@ function isHexAddress(s: string): s is `0x${string}` {
   return /^0x[a-fA-F0-9]{40}$/.test(s);
 }
 
+/** event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry) */
+const SERIES_DEFINED = parseAbiItem(
+  "event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry)"
+);
+// viem's decodeEventLog accepts an ABI array. We'll pass just this single event.
+const SERIES_EVENTS_ABI = [SERIES_DEFINED] as const;
+
 export default function DefineSeriesForm() {
   const { writeContractAsync, isPending } = useWriteContract();
+  const publicClient = usePublicClient();
 
   // Underlying (decimals inferred internally)
   const [underSym, setUnderSym] = useState<TokenSymbol>(UNDERLYING_DEFAULT_SYMBOL);
@@ -62,10 +70,10 @@ export default function DefineSeriesForm() {
         return;
       }
 
-      const strikeWei = parseUnits(strikeHuman, 18);                    // WXDAI 1e18
-      const collatWei = parseUnits(collatHuman, underlying.decimals);   // underlying decimals
+      const strikeWei = parseUnits(strikeHuman, 18);                  // WXDAI 1e18
+      const collatWei = parseUnits(collatHuman, underlying.decimals); // underlying decimals
 
-      await writeContractAsync({
+      const hash = await writeContractAsync({
         address: VAULT_ADDRESS,
         abi: vaultAbi,
         functionName: "defineSeries",
@@ -78,6 +86,42 @@ export default function DefineSeriesForm() {
           oracleAddr as `0x${string}`,
         ],
       });
+
+      // Wait for confirmation and decode the SeriesDefined event
+      if (publicClient && hash) {
+        const receipt = await publicClient.waitForTransactionReceipt({ hash });
+
+        // Try to find the SeriesDefined event in the tx logs and broadcast it as a browser event.
+        for (const log of receipt.logs ?? []) {
+          try {
+            const decoded = decodeEventLog({
+              abi: SERIES_EVENTS_ABI as any,
+              data: log.data,
+              topics: log.topics,
+            });
+
+            if (decoded?.eventName === "SeriesDefined") {
+              const { id, underlying, strike, expiry } = decoded.args as {
+                id: bigint;
+                underlying: `0x${string}`;
+                strike: bigint;
+                expiry: bigint;
+              };
+
+              // Fire an optimistic UI signal to the app — SeriesTable listens to this.
+              window.dispatchEvent(
+                new CustomEvent("series:defined", {
+                  detail: { id, underlying, strike, expiry },
+                })
+              );
+
+              break; // Found it
+            }
+          } catch {
+            // Not the event we want — continue scanning logs
+          }
+        }
+      }
 
       setStrikeHuman("");
       setExpiryIso("");
@@ -92,7 +136,6 @@ export default function DefineSeriesForm() {
 
   return (
     <Card className="p-5">
-      {/* 12-column grid, bottoms aligned, uniform field heights */}
       <div className="grid grid-cols-12 gap-3 items-end">
         {/* Underlying */}
         <div className="col-span-12 md:col-span-3">

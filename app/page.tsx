@@ -2,7 +2,6 @@
 "use client";
 
 import DepositWithdraw from "@/components/DepositWithdraw";
-import MintOptionsForm from "@/components/MintOptionsForm";
 import CreateLimitOrder from "@/components/CreateLimitOrder";
 import SettleExerciseReclaim from "@/components/SettleExerciseReclaim";
 import SeriesTable from "@/components/SeriesTable";
@@ -42,13 +41,6 @@ export default function VaultPage() {
         <h2 className="text-lg font-medium">Collateral</h2>
         {/* DepositWithdraw already renders its own Card */}
         <DepositWithdraw />
-      </div>
-
-      {/* Mint Options */}
-      <div className="space-y-3">
-        <h2 className="text-lg font-medium">Mint Options</h2>
-        {/* MintOptionsForm renders its own Card */}
-        <MintOptionsForm />
       </div>
 
       {/* Create 1inch Order */}

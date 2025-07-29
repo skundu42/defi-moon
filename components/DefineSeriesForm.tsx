@@ -1,8 +1,9 @@
+// components/DefineSeriesForm.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
-import { parseUnits, parseAbiItem, decodeEventLog } from "viem";
-import { usePublicClient, useWriteContract } from "wagmi";
+import React, { useEffect, useMemo, useState } from "react";
+import { parseUnits } from "viem";
+import { usePublicClient, useWriteContract, useWatchContractEvent } from "wagmi";
 
 import { Card } from "@heroui/card";
 import { Input } from "@heroui/input";
@@ -16,6 +17,7 @@ import {
   UNDERLYING_DEFAULT_SYMBOL,
   getTokenBySymbol,
   type TokenSymbol,
+  type TokenMeta,
 } from "@/lib/token";
 
 function Info({ tip }: { tip: string }) {
@@ -32,26 +34,23 @@ function isHexAddress(s: string): s is `0x${string}` {
   return /^0x[a-fA-F0-9]{40}$/.test(s);
 }
 
-/** event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry) */
-const SERIES_DEFINED = parseAbiItem(
-  "event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry)"
-);
-// viem's decodeEventLog accepts an ABI array. We'll pass just this single event.
-const SERIES_EVENTS_ABI = [SERIES_DEFINED] as const;
+type Notice = { id: string; type: "success" | "error"; text: string };
 
 export default function DefineSeriesForm() {
-  const { writeContractAsync, isPending } = useWriteContract();
+  const { writeContractAsync, isLoading: isSubmitting } = useWriteContract();
   const publicClient = usePublicClient();
 
-  // Underlying (decimals inferred internally)
+  // Underlying selector + guaranteed fallback
   const [underSym, setUnderSym] = useState<TokenSymbol>(UNDERLYING_DEFAULT_SYMBOL);
-  const underlying = useMemo(() => getTokenBySymbol(underSym), [underSym]);
+  const underlying: TokenMeta = useMemo(() => {
+    return getTokenBySymbol(underSym) ?? getTokenBySymbol(UNDERLYING_DEFAULT_SYMBOL)!;
+  }, [underSym]);
 
-  // Form fields (human units)
-  const [strikeHuman, setStrikeHuman] = useState<string>("");
-  const [expiryIso, setExpiryIso] = useState<string>("");
-  const [collatHuman, setCollatHuman] = useState<string>("");
-  const [oracleAddr, setOracleAddr] = useState<string>("");
+  // form fields
+  const [strikeHuman, setStrikeHuman] = useState("");
+  const [expiryIso, setExpiryIso] = useState("");
+  const [collatHuman, setCollatHuman] = useState("");
+  const [oracleAddr, setOracleAddr] = useState("");
 
   const expirySec = useMemo(() => {
     if (!expiryIso) return 0;
@@ -59,21 +58,47 @@ export default function DefineSeriesForm() {
     return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
   }, [expiryIso]);
 
+  // notifications
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const pushNotice = (type: Notice["type"], text: string) =>
+    setNotices((n) => [...n, { id: crypto.randomUUID(), type, text }]);
+  const clearNotice = (id: string) =>
+    setNotices((n) => n.filter((x) => x.id !== id));
+
+  // re-broadcast on-chain events
+  useWatchContractEvent({
+    address: VAULT_ADDRESS,
+    abi: vaultAbi,
+    eventName: "SeriesDefined",
+    onLogs(logs) {
+      for (const log of logs) {
+        const detail = {
+          id: (log.args.id as bigint).toString(),
+          underlying: log.args.underlying as `0x${string}`,
+          strike: log.args.strike as bigint,
+          expiry: log.args.expiry as bigint,
+        };
+        window.dispatchEvent(new CustomEvent("series:defined", { detail }));
+      }
+    },
+  });
+
   const onSubmit = async () => {
+    if (!strikeHuman || !expirySec || !collatHuman || !oracleAddr) {
+      pushNotice("error", "All fields are required.");
+      return;
+    }
+    if (!isHexAddress(oracleAddr)) {
+      pushNotice("error", "Oracle must be a valid 0x… address.");
+      return;
+    }
+
     try {
-      if (!strikeHuman || !expirySec || !collatHuman || !oracleAddr) {
-        alert("Please fill all fields (including Oracle address).");
-        return;
-      }
-      if (!isHexAddress(oracleAddr)) {
-        alert("Oracle address must be a valid 0x…40-hex address.");
-        return;
-      }
+      const strikeWei = parseUnits(strikeHuman, 18);
+      const collatWei = parseUnits(collatHuman, underlying.decimals);
 
-      const strikeWei = parseUnits(strikeHuman, 18);                  // WXDAI 1e18
-      const collatWei = parseUnits(collatHuman, underlying.decimals); // underlying decimals
-
-      const hash = await writeContractAsync({
+      // submit and get the txHash string
+      const txHash = await writeContractAsync({
         address: VAULT_ADDRESS,
         abi: vaultAbi,
         functionName: "defineSeries",
@@ -87,73 +112,58 @@ export default function DefineSeriesForm() {
         ],
       });
 
-      // Wait for confirmation and decode the SeriesDefined event
-      if (publicClient && hash) {
-        const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      // wait for on-chain confirmation
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-        // Try to find the SeriesDefined event in the tx logs and broadcast it as a browser event.
-        for (const log of receipt.logs ?? []) {
-          try {
-            const decoded = decodeEventLog({
-              abi: SERIES_EVENTS_ABI as any,
-              data: log.data,
-              topics: log.topics,
-            });
+      pushNotice("success", "Series defined successfully!");
 
-            if (decoded?.eventName === "SeriesDefined") {
-              const { id, underlying, strike, expiry } = decoded.args as {
-                id: bigint;
-                underlying: `0x${string}`;
-                strike: bigint;
-                expiry: bigint;
-              };
-
-              // Fire an optimistic UI signal to the app — SeriesTable listens to this.
-              window.dispatchEvent(
-                new CustomEvent("series:defined", {
-                  detail: { id, underlying, strike, expiry },
-                })
-              );
-
-              break; // Found it
-            }
-          } catch {
-            // Not the event we want — continue scanning logs
-          }
-        }
-      }
-
+      // reset form
       setStrikeHuman("");
       setExpiryIso("");
       setCollatHuman("");
       setOracleAddr("");
-      alert("Series defined!");
     } catch (e: any) {
       console.error(e);
-      alert(e?.shortMessage ?? e?.message ?? "Failed to define series");
+      pushNotice("error", e?.shortMessage ?? e?.message ?? "Failed to define series.");
     }
   };
 
   return (
-    <Card className="p-5">
+    <Card className="p-5 space-y-4">
+      {/* Notifications */}
+      {notices.map((n) => (
+        <div
+          key={n.id}
+          className={`p-3 text-sm rounded-xl ${
+            n.type === "success"
+              ? "bg-green-50 border border-green-200 text-green-800"
+              : "bg-red-50 border border-red-200 text-red-800"
+          }`}
+        >
+          {n.text}
+          <button
+            onClick={() => clearNotice(n.id)}
+            className="ml-2 text-xs opacity-50 hover:opacity-100"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+
+      {/* Form */}
       <div className="grid grid-cols-12 gap-3 items-end">
         {/* Underlying */}
         <div className="col-span-12 md:col-span-3">
           <label className="block mb-1 text-sm font-medium">
-            Underlying <Info tip="Token used as collateral. Must match the vault’s underlying." />
+            Underlying <Info tip="Token used as collateral." />
           </label>
           <Select
             selectionMode="single"
-            defaultSelectedKeys={new Set([UNDERLYING_DEFAULT_SYMBOL])}
             selectedKeys={new Set([underSym])}
-            onSelectionChange={(keys) => {
-              const next = Array.from(keys)[0] as TokenSymbol;
-              setUnderSym(next);
-            }}
-            classNames={{
-              trigger: "h-12 bg-default-100",
-              value: "text-sm",
-            }}
+            onSelectionChange={(keys) =>
+              setUnderSym(Array.from(keys as Set<string>)[0] as TokenSymbol)
+            }
+            classNames={{ trigger: "h-12 bg-default-100", value: "text-sm" }}
           >
             {ALL_TOKENS.map((t) => (
               <SelectItem
@@ -170,59 +180,76 @@ export default function DefineSeriesForm() {
         {/* Strike */}
         <div className="col-span-12 md:col-span-2">
           <label className="block mb-1 text-sm font-medium">
-            Strike (WXDAI) <Info tip="Enter the strike price in WXDAI (human units)." />
+            Strike (WXDAI) <Info tip="e.g. 150" />
           </label>
           <Input
             placeholder="e.g. 150"
             value={strikeHuman}
             onChange={(e) => setStrikeHuman(e.target.value)}
-            classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
+            classNames={{
+              inputWrapper: "h-12 bg-default-100",
+              input: "text-sm",
+            }}
           />
         </div>
 
         {/* Expiry */}
         <div className="col-span-12 md:col-span-3">
           <label className="block mb-1 text-sm font-medium">
-            Expiry <Info tip="UTC date & time when the option expires." />
+            Expiry <Info tip="UTC date & time" />
           </label>
           <Input
             type="datetime-local"
             value={expiryIso}
             onChange={(e) => setExpiryIso(e.target.value)}
-            classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
+            classNames={{
+              inputWrapper: "h-12 bg-default-100",
+              input: "text-sm",
+            }}
           />
         </div>
 
-        {/* Collateral per option */}
+        {/* Collateral */}
         <div className="col-span-12 md:col-span-2">
           <label className="block mb-1 text-sm font-medium">
-            Collateral / option ({underlying.symbol}){" "}
-            <Info tip={`Amount of ${underlying.symbol} locked per option (e.g., “1”).`} />
+            Collateral/option ({underlying.symbol}){" "}
+            <Info tip={`e.g. 1 ${underlying.symbol}`} />
           </label>
           <Input
             placeholder="e.g. 1"
             value={collatHuman}
             onChange={(e) => setCollatHuman(e.target.value)}
-            classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
+            classNames={{
+              inputWrapper: "h-12 bg-default-100",
+              input: "text-sm",
+            }}
           />
         </div>
 
-        {/* Oracle (manual entry) */}
+        {/* Oracle */}
         <div className="col-span-12 md:col-span-2">
           <label className="block mb-1 text-sm font-medium">
-            Oracle <Info tip="Oracle contract that returns price in WXDAI (1e18 scale)." />
+            Oracle <Info tip="Price feed in WXDAI (1e18 scale)" />
           </label>
           <Input
             placeholder="0x…"
             value={oracleAddr}
             onChange={(e) => setOracleAddr(e.target.value)}
-            classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
+            classNames={{
+              inputWrapper: "h-12 bg-default-100",
+              input: "text-sm",
+            }}
           />
         </div>
 
-        {/* Button */}
+        {/* Submit */}
         <div className="col-span-12 md:col-span-2 flex md:justify-end">
-          <Button color="primary" onPress={onSubmit} isLoading={isPending} className="h-12">
+          <Button
+            color="primary"
+            onPress={onSubmit}
+            isLoading={isSubmitting}
+            className="h-12"
+          >
             Define Series
           </Button>
         </div>

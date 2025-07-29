@@ -224,7 +224,9 @@ contract OptionsVault is AccessControl, Pausable, ReentrancyGuard {
             totalLockedBySeries[id] = 0;
         }
 
+        // **NEW**: decrement recorded deposit so collateralBalance reflects what’s left
         if (reclaimable > 0) {
+            collateralBalance[msg.sender] -= reclaimable;
             UNDERLYING.safeTransfer(msg.sender, reclaimable);
         }
 

@@ -1,86 +1,59 @@
+// components/CreateLimitOrder.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Address, parseUnits, formatUnits, parseAbiItem } from "viem";
 import {
   useAccount,
   useSignTypedData,
   usePublicClient,
+  useReadContract,
   useWatchContractEvent,
+  useWriteContract,
 } from "wagmi";
-import { useSearchParams } from "next/navigation";
-
+import {
+  Address as ViemAddress,
+  parseAbiItem,
+  formatUnits,
+  parseUnits,
+} from "viem";
+import { Select, SelectItem } from "@heroui/select";
 import { Input } from "@heroui/input";
 import { Button } from "@heroui/button";
 import { Card } from "@heroui/card";
-import { Select, SelectItem } from "@heroui/select";
-import { Snippet } from "@heroui/snippet";
-import { Spacer } from "@heroui/spacer";
 import { Tooltip } from "@heroui/tooltip";
 import { Spinner } from "@heroui/spinner";
 
-import { useTokenAllowance } from "@/hooks/useTokenAllowance";
-import { useOptionWrapper } from "@/hooks/useOptionWrapper";
 import {
-  buildLimitOrder,
+  buildLimitOrder1155,
   submitSignedOrder,
   fetchOrdersByMaker,
 } from "@/lib/oneInch";
-import { LOP_V4_GNOSIS, VAULT_ADDRESS, vaultAbi } from "@/lib/contracts";
-import { QUOTE_TOKENS, type TokenMeta, ALL_TOKENS } from "@/lib/token";
+import {
+  VAULT_ADDRESS,
+  CALLTOKEN_ADDRESS,
+  ERC1155_PROXY_ADDRESS,
+  vaultAbi,
+  erc1155Abi,
+} from "@/lib/contracts";
 
-/** Small round "i" badge with a tooltip */
+const SERIES_DEFINED = parseAbiItem(
+  "event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry)"
+);
+
+// Hard-code network id to avoid missing export
+const NETWORK_ID = 100;
+
 function Info({ tip }: { tip: string }) {
   return (
     <Tooltip content={tip} placement="top" offset={6}>
-      <span
-        className="inline-flex items-center justify-center w-4 h-4 text-[10px] rounded-full border border-default-300 text-default-600 cursor-help"
-        aria-label="info"
-      >
+      <span className="inline-flex items-center justify-center w-4 h-4 text-[10px] rounded-full border border-default-300 text-default-600 cursor-help">
         i
       </span>
     </Tooltip>
   );
 }
 
-function fmt(num: number, maxFrac = 6) {
-  if (!Number.isFinite(num)) return "0";
-  return num.toLocaleString(undefined, { maximumFractionDigits: maxFrac });
-}
-
-type SeriesRow = {
-  id: bigint;
-  underlying: `0x${string}`;
-  strike: bigint; // 1e18 WXDAI
-  expiry: bigint; // unix
-};
-
-// event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry)
-const SERIES_DEFINED = parseAbiItem(
-  "event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry)"
-);
-
-const DEPLOY_FROM = process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK
-  ? BigInt(process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK)
-  : undefined;
-
-const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-
-function symFromAddress(addr: string): string {
-  const t = ALL_TOKENS.find(
-    (x) => x.address.toLowerCase() === addr.toLowerCase()
-  );
-  return t ? t.symbol : `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
-
-function formatStrikeWXDAI(n: bigint): string {
-  const s = n.toString().padStart(19, "0");
-  const head = s.slice(0, -18) || "0";
-  const tail = s.slice(-18).replace(/0+$/, "");
-  return tail.length ? `${head}.${tail}` : head;
-}
-
-function formatDateUTC(ts: bigint): string {
+function formatDateUTC(ts: bigint) {
   const d = new Date(Number(ts) * 1000);
   return isNaN(d.getTime())
     ? "-"
@@ -88,607 +61,364 @@ function formatDateUTC(ts: bigint): string {
 }
 
 export default function CreateLimitOrder() {
-  const { address } = useAccount();
+  const { address, isConnected } = useAccount();
   const { signTypedDataAsync } = useSignTypedData();
   const publicClient = usePublicClient();
 
-  // Hydration-safe rendering
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
-
-  // ------------------ Load Active Series (historical + live) ------------------
-  const [seriesLoading, setSeriesLoading] = useState(true);
-  const [allSeries, setAllSeries] = useState<SeriesRow[]>([]);
+  // Load all series definitions
+  const [allSeries, setAllSeries] = useState<
+    { id: bigint; strike: bigint; expiry: bigint }[]
+  >([]);
+  const [loadingSeries, setLoadingSeries] = useState(true);
   const bootRef = useRef(false);
-
-  // Backfill logs in chunks; then filter to active only on demand.
   useEffect(() => {
     if (!publicClient || bootRef.current) return;
     bootRef.current = true;
-
     (async () => {
+      setLoadingSeries(true);
       try {
-        setSeriesLoading(true);
         const latest = await publicClient.getBlockNumber();
-        const DEFAULT_SPAN = 200_000n;
-        const fromBlock =
-          DEPLOY_FROM !== undefined
-            ? DEPLOY_FROM
-            : latest > DEFAULT_SPAN
-            ? latest - DEFAULT_SPAN
-            : 0n;
-
-        const step = 10_000n;
-        const acc: SeriesRow[] = [];
-
-        for (let start = fromBlock; start <= latest; start += step + 1n) {
-          const end = start + step > latest ? latest : start + step;
+        const span = 200_000n;
+        const from = latest > span ? latest - span : 0n;
+        const step = 20_000n;
+        const acc: typeof allSeries = [];
+        for (let b = from; b <= latest; b += step + 1n) {
+          const to = b + step > latest ? latest : b + step;
           const logs = await publicClient.getLogs({
             address: VAULT_ADDRESS,
+            abi: vaultAbi,
             event: SERIES_DEFINED,
-            fromBlock: start,
-            toBlock: end,
+            fromBlock: b,
+            toBlock: to,
           });
           for (const l of logs) {
             acc.push({
               id: l.args.id as bigint,
-              underlying: l.args.underlying as `0x${string}`,
               strike: l.args.strike as bigint,
               expiry: l.args.expiry as bigint,
             });
           }
         }
-
-        const map = new Map<string, SeriesRow>();
-        for (const r of acc) map.set(r.id.toString(), r);
-
-        setAllSeries(Array.from(map.values()));
-      } catch (err) {
-        console.error("Backfill series failed:", err);
+        // de-dup & sort by expiry ascending
+        const map = new Map<string, typeof acc[0]>();
+        acc.forEach((r) => map.set(r.id.toString(), r));
+        setAllSeries(
+          Array.from(map.values()).sort((a, b) =>
+            Number(a.expiry - b.expiry)
+          )
+        );
+      } catch (e: any) {
+        console.error("Series load error:", e);
       } finally {
-        setSeriesLoading(false);
+        setLoadingSeries(false);
       }
     })();
   }, [publicClient]);
 
-  // Live subscribe for new SeriesDefined
+  // Subscribe to new SeriesDefined events
   useWatchContractEvent({
     address: VAULT_ADDRESS,
     abi: vaultAbi,
     eventName: "SeriesDefined",
     onLogs(logs) {
       setAllSeries((prev) => {
-        const map = new Map<string, SeriesRow>();
-        for (const r of prev) map.set(r.id.toString(), r);
+        const m = new Map(prev.map((r) => [r.id.toString(), r]));
         for (const l of logs) {
-          map.set((l.args?.id as bigint).toString(), {
-            id: l.args?.id as bigint,
-            underlying: l.args?.underlying as `0x${string}`,
-            strike: l.args?.strike as bigint,
-            expiry: l.args?.expiry as bigint,
+          m.set((l.args.id as bigint).toString(), {
+            id: l.args.id as bigint,
+            strike: l.args.strike as bigint,
+            expiry: l.args.expiry as bigint,
           });
         }
-        return Array.from(map.values());
+        return Array.from(m.values()).sort((a, b) =>
+          Number(a.expiry - b.expiry)
+        );
       });
     },
   });
 
-  const nowSec = Math.floor(Date.now() / 1000);
+  // Selected series
+  const [selectedSeriesId, setSelectedSeriesId] = useState<bigint>();
+  const now = Math.floor(Date.now() / 1000);
   const activeSeries = useMemo(
-    () =>
-      allSeries
-        .filter((s) => Number(s.expiry) > nowSec)
-        .sort((a, b) =>
-          a.expiry === b.expiry ? Number(a.id - b.id) : Number(a.expiry - b.expiry)
-        ), // soonest expiry first
-    [allSeries, nowSec]
+    () => allSeries.filter((s) => Number(s.expiry) > now),
+    [allSeries, now]
   );
 
-  // ------------------ Selection: URL param OR first active ------------------
-  const search = useSearchParams();
-  const seriesIdParam = search?.get("seriesId");
-  const preselectFromUrl = useMemo(() => {
-    if (!seriesIdParam) return undefined;
-    try {
-      const id = BigInt(seriesIdParam);
-      return activeSeries.find((s) => s.id === id) ? id : undefined;
-    } catch {
-      return undefined;
-    }
-  }, [seriesIdParam, activeSeries]);
+  // ERC-1155 proxy approval
+  const { data: isApprovedForAll = false } = useReadContract({
+    address: CALLTOKEN_ADDRESS,
+    abi: erc1155Abi,
+    functionName: "isApprovedForAll",
+    args: [address as ViemAddress, ERC1155_PROXY_ADDRESS as ViemAddress],
+    query: { enabled: Boolean(address) },
+  });
+  const { writeContractAsync: setApprovalForAll } = useWriteContract({
+    address: CALLTOKEN_ADDRESS,
+    abi: erc1155Abi,
+    functionName: "setApprovalForAll",
+  });
 
-  const [selectedSeriesId, setSelectedSeriesId] = useState<bigint | undefined>(undefined);
-
-  // Initialize selection once activeSeries is known
-  useEffect(() => {
-    if (!mounted) return;
-    if (activeSeries.length === 0) {
-      setSelectedSeriesId(undefined);
-      return;
-    }
-    setSelectedSeriesId((prev) => {
-      if (prev !== undefined) return prev;
-      if (preselectFromUrl !== undefined) return preselectFromUrl;
-      return activeSeries[0]?.id;
-    });
-  }, [mounted, activeSeries, preselectFromUrl]);
-
-  const selectedSeries = useMemo(
-    () => activeSeries.find((s) => s.id === selectedSeriesId),
-    [activeSeries, selectedSeriesId]
+  // Form state
+  const [qtyStr, setQtyStr] = useState("");
+  const [takerSym, setTakerSym] = useState<"USDC" | "WXDAI" | "WETH">(
+    "WXDAI"
   );
-
-  // ------------------ Wrapper & balances (for selected series) ------------------
-  const {
-    erc20Address,
-    isApprovedForAll,
-    balance1155,
-    makerBalance20,
-    makerSymbol20,
-    makerDecimals20,
-    setApprovalForAll,
-    ensureSeriesERC20,
-    wrap,
-  } = useOptionWrapper(selectedSeriesId);
-
-  // NO automatic wrapper creation here. User must click a button.
-  const needsWrapper = useMemo(
-    () => !erc20Address || erc20Address === ZERO_ADDR,
-    [erc20Address]
-  );
-
-  // ------------------ Taker token dropdown ------------------
-  const defaultTaker =
-    QUOTE_TOKENS.find((q) => q.symbol === "USDC")?.symbol ?? QUOTE_TOKENS[0]?.symbol;
-  const [takerSym, setTakerSym] = useState<string | undefined>(defaultTaker);
-  const takerToken: TokenMeta | undefined = useMemo(
-    () => QUOTE_TOKENS.find((t) => t.symbol === takerSym),
-    [takerSym]
-  );
-
-  // ------------------ Inputs ------------------
-  const [wrapQty, setWrapQty] = useState<string>("");
-  const [makingAmount, setMakingAmount] = useState<string>("");
-  const [takingAmount, setTakingAmount] = useState<string>("");
-
-  // ------------------ State ------------------
+  const [takerAmountStr, setTakerAmountStr] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [orderHash, setOrderHash] = useState<`0x${string}` | null>(null);
-  const [openOrders, setOpenOrders] = useState<any[]>([]);
-  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [orderHash, setOrderHash] = useState<string | null>(null);
+  const [notices, setNotices] = useState<string[]>([]);
 
-  // Allowance (maker token approval for 1inch LOP)
-  const { approve, hasEnough, isApproving, refetchAllowance } = useTokenAllowance(
-    (erc20Address as Address | undefined),
-    LOP_V4_GNOSIS
-  );
+  const addNotice = (msg: string) => setNotices((n) => [...n, msg]);
+  const expirationSec = 2 * 60 * 60;
 
-  // Derived displays
-  const makerBalanceOptions = useMemo(() => {
-    const dec = makerDecimals20 ?? 18;
-    const human = formatUnits(makerBalance20 ?? 0n, dec);
-    const n = Number(human);
-    return fmt(n);
-  }, [makerBalance20, makerDecimals20]);
-
-  const impliedPrice = useMemo(() => {
-    if (!makingAmount || !takingAmount || !takerToken) return "";
-    const m = Number(makingAmount),
-      t = Number(takingAmount);
-    if (!Number.isFinite(m) || !Number.isFinite(t) || m <= 0) return "";
-    return String(t / m);
-  }, [makingAmount, takingAmount, takerToken]);
-
-  // ------------------ Actions ------------------
-  const handleEnsureWrapper = async () => {
-    if (!selectedSeriesId) {
-      alert("Select an active series first.");
-      return;
-    }
+  // Approve proxy
+  const onApproveProxy = async () => {
+    if (!address) return;
     try {
-      await ensureSeriesERC20(
-        `WrappedCall-${selectedSeriesId}`,
-        `wCALL-${selectedSeriesId.toString().slice(0, 6)}`
-      );
-      // no auto-refetch needed; hook should expose updated address on next read cycle
+      await setApprovalForAll({
+        args: [ERC1155_PROXY_ADDRESS as ViemAddress, true],
+      });
+      addNotice("ERC1155 proxy approved ✔️");
     } catch (e: any) {
-      console.error(e);
-      alert(e?.shortMessage ?? e?.message ?? "Failed to create ERC-20 wrapper");
+      addNotice(`Approve failed: ${e?.message ?? e}`);
     }
   };
 
-  const handleApprove1155Operator = async () => {
+  // Create order
+  const onCreateOrder = async () => {
+    if (!address) return addNotice("Connect wallet first");
+    if (!selectedSeriesId) return addNotice("Select a series");
+
+    // parse ERC-1155 qty (integer)
+    const qty = BigInt(qtyStr || "0");
+    if (qty <= 0n) return addNotice("Enter a positive qty");
+
+    // parse taker amount with decimals
+    const decimals = takerSym === "USDC" ? 6 : 18;
+    let takerAmt: bigint;
     try {
-      await setApprovalForAll(true);
-    } catch (e: any) {
-      console.error(e);
-      alert(e?.shortMessage ?? e?.message ?? "Approval failed");
+      takerAmt = parseUnits(takerAmountStr || "0", decimals);
+    } catch {
+      return addNotice("Invalid receive amount format");
     }
-  };
-
-  const doWrap = async () => {
-    if (!selectedSeriesId) return alert("Select an active series.");
-    const qty = Number(wrapQty || "0");
-    if (!Number.isFinite(qty) || qty <= 0) return alert("Enter wrap qty");
-    if (needsWrapper) return alert("Create the ERC-20 wrapper first.");
-    if (!isApprovedForAll) return alert("Please approve the 1155 operator first.");
-    try {
-      await wrap(BigInt(qty));
-      setWrapQty("");
-    } catch (e: any) {
-      console.error(e);
-      alert(e?.shortMessage ?? e?.message ?? "Wrap failed");
-    }
-  };
-
-  const valid = useMemo(() => {
-    if (!address || !erc20Address || !takerToken) return false;
-    if (!makingAmount || !takingAmount) return false;
-    if (!selectedSeriesId) return false;
-    if (needsWrapper) return false;
-    return true;
-  }, [address, erc20Address, takerToken, makingAmount, takingAmount, selectedSeriesId, needsWrapper]);
-
-  const handleSubmit = async () => {
-    if (!address || !erc20Address || !takerToken || !selectedSeriesId) return;
-    if (needsWrapper) {
-      alert("Create the ERC-20 wrapper for this series first.");
-      return;
-    }
-
-    const making = parseUnits(makingAmount, makerDecimals20 ?? 18);
-    const taking = parseUnits(takingAmount, takerToken.decimals);
-
-    // Do NOT auto-approve: require explicit user action.
-    if (!hasEnough?.(making)) {
-      alert("Insufficient allowance. Click 'Approve 1inch (maker)' first, then submit again.");
-      return;
-    }
+    if (takerAmt <= 0n) return addNotice("Enter a positive receive amount");
 
     setSubmitting(true);
-    setOrderHash(null);
     try {
-      const { order, typedData } = buildLimitOrder({
+      const built = buildLimitOrder1155({
         makerAddress: address,
-        makerAsset: erc20Address,
-        takerAsset: takerToken.address,
-        makingAmount: making,
-        takingAmount: taking,
-        expirationSec: 2 * 60 * 60, // 2h
+        maker1155: {
+          token: CALLTOKEN_ADDRESS as ViemAddress,
+          tokenId: selectedSeriesId,
+          amount: qty,
+          data: "0x",
+        },
+        takerAsset: (process.env[`NEXT_PUBLIC_TOKEN_${takerSym}`] ??
+          "") as ViemAddress,
+        takerAmount: takerAmt,
+        expirationSec,
       });
 
-      const sig = await signTypedDataAsync({
-        domain: typedData.domain as any,
-        types: typedData.types as any,
+      const signature = await signTypedDataAsync({
+        domain: built.typedData.domain as any,
+        types: built.typedData.types as any,
         primaryType: "Order",
-        message: typedData.message as any,
+        message: built.typedData.message as any,
       });
 
-      const hash = await submitSignedOrder(order, sig as `0x${string}`);
-      setOrderHash(hash);
+      await submitSignedOrder(built, signature);
 
-      // Fetch user's open orders (best effort)
-      setOrdersLoading(true);
-      try {
-        const orders = await fetchOrdersByMaker(address);
-        setOpenOrders(orders.items ?? orders ?? []);
-      } catch (err) {
-        console.warn("Fetch orders failed:", err);
-      } finally {
-        setOrdersLoading(false);
-      }
+      const h = built.order.getOrderHash(NETWORK_ID);
+      setOrderHash(h);
+      addNotice(`Order created: ${h}`);
+
+      // reload on-chain orders
+      await loadOrders();
     } catch (e: any) {
-      console.error(e);
-      alert(e?.shortMessage ?? e?.message ?? "Order submission failed");
+      addNotice(`Error: ${e?.message ?? e}`);
     } finally {
       setSubmitting(false);
     }
   };
 
-  // ------------------ UI ------------------
+  // Fetch off-chain orders (1inch orderbook)
+  const [openOrders, setOpenOrders] = useState<any[]>([]);
+  const loadOrders = async () => {
+    if (!address) return;
+    try {
+      const list = await fetchOrdersByMaker(address);
+      setOpenOrders(list.items ?? list);
+    } catch (e: any) {
+      console.error("Orderbook load error:", e);
+      addNotice("Could not load open orders");
+    }
+  };
+  useEffect(() => {
+    if (address) loadOrders();
+  }, [address]);
+
   return (
-    <Card className="p-5">
-      <h3 className="text-lg font-medium mb-4">Create 1inch Limit Order</h3>
+    <Card className="p-5 space-y-4">
+      <h3 className="text-lg font-medium">
+        Create 1inch ERC-1155 Limit Order
+      </h3>
 
-      {/* Row 0: Active Series Selector */}
-      <div className="rounded-2xl border border-default-200/50 bg-content1 p-4 mb-4">
-        <div className="grid grid-cols-12 gap-3 items-end">
-          <div className="col-span-12 md:col-span-8">
-            <label className="block mb-1 text-sm font-medium">
-              Active Series{" "}
-              <Info tip="Choose an unexpired option series. Expired series are hidden here." />
-            </label>
-
-            {seriesLoading ? (
-              <div className="h-12 flex items-center gap-2 px-3 rounded-medium bg-default-100">
-                <Spinner size="sm" /> <span className="text-sm text-default-500">Loading series…</span>
-              </div>
-            ) : (
-              <Select
-                selectionMode="single"
-                selectedKeys={
-                  mounted && selectedSeriesId
-                    ? new Set([selectedSeriesId.toString()])
-                    : new Set()
-                }
-                onSelectionChange={(keys) => {
-                  const raw = Array.from(keys as Set<React.Key>)[0] as string | undefined;
-                  if (!raw) {
-                    setSelectedSeriesId(undefined);
-                  } else {
-                    try {
-                      setSelectedSeriesId(BigInt(raw));
-                    } catch {
-                      setSelectedSeriesId(undefined);
-                    }
-                  }
-                }}
-                classNames={{
-                  trigger: "h-12 bg-default-100",
-                  value: "text-sm",
-                }}
-                disallowEmptySelection
-                aria-label="Select active series"
-              >
-                {activeSeries.map((s) => (
-                  <SelectItem
-                    key={s.id.toString()}
-                    value={s.id.toString()}
-                    textValue={`${s.id.toString()} — ${symFromAddress(
-                      s.underlying
-                    )} — K ${formatStrikeWXDAI(s.strike)} — exp ${formatDateUTC(s.expiry)}`}
-                  >
-                    <div className="flex flex-col">
-                      <span className="font-mono">{s.id.toString()}</span>
-                      <span className="text-xs text-default-500">
-                        {symFromAddress(s.underlying)} • K {formatStrikeWXDAI(s.strike)} • exp{" "}
-                        {formatDateUTC(s.expiry)}
-                      </span>
-                    </div>
-                  </SelectItem>
-                ))}
-              </Select>
-            )}
-          </div>
-
-          <div className="col-span-12 md:col-span-4 flex gap-2 md:justify-end">
-            {needsWrapper ? (
-              <Button
-                onPress={handleEnsureWrapper}
-                isDisabled={!mounted || !selectedSeriesId}
-                className="h-12"
-              >
-                Create Series ERC-20
-              </Button>
-            ) : (
-              <div className="text-sm text-success self-end mb-1">
-                ERC-20 wrapper ready.
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Row 1: Series + Wrap */}
-      <div className="rounded-2xl border border-default-200/50 bg-content1 p-4 mb-4">
-        <div className="grid grid-cols-12 gap-3 items-end">
-          <div className="col-span-6 md:col-span-2">
-            <label className="block mb-1 text-sm font-medium">
-              1155 Balance (options){" "}
-              <Info tip="Unwrapped ERC-1155 options for this series." />
-            </label>
-            <Input
-              isReadOnly
-              value={mounted ? (balance1155?.toString() ?? "0") : "0"}
-              classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
-            />
-          </div>
-
-          <div className="col-span-6 md:col-span-4">
-            <label className="block mb-1 text-sm font-medium">
-              Series ERC20 <Info tip="ERC-20 wrapper token address for this series." />
-            </label>
-            <Input
-              isReadOnly
-              value={mounted ? (erc20Address ?? "") : ""}
-              classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
-            />
-          </div>
-
-          <div className="col-span-6 md:col-span-2">
-            <label className="block mb-1 text-sm font-medium">
-              Wrap Qty (options) <Info tip="How many ERC-1155 options to wrap." />
-            </label>
-            <Input
-              placeholder="e.g. 10"
-              value={wrapQty}
-              onChange={(e) => setWrapQty(e.target.value)}
-              classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
-            />
-          </div>
-
-          <div className="col-span-6 md:col-span-4 flex gap-2 md:justify-end">
-            {!isApprovedForAll && (
-              <Button
-                variant="bordered"
-                className="h-12"
-                onPress={handleApprove1155Operator}
-                isDisabled={!mounted || !selectedSeriesId}
-              >
-                Approve 1155 Operator
-              </Button>
-            )}
-            <Button
-              onPress={doWrap}
-              isDisabled={!mounted || !selectedSeriesId || needsWrapper}
-              className="h-12"
-            >
-              Wrap
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      {/* Row 2: Maker / Taker */}
-      <div className="grid grid-cols-12 gap-4">
-        {/* Maker */}
-        <div className="col-span-12 md:col-span-6 rounded-2xl border border-default-200/50 bg-content1 p-4">
-          <div className="mb-2 text-sm font-medium">Sell (Maker)</div>
-          <div className="grid grid-cols-12 gap-3 items-end">
-            <div className="col-span-12 md:col-span-7">
-              <label className="block mb-1 text-sm font-medium">
-                Maker Token (ERC20){" "}
-                <Info tip="The ERC-20 you’ll sell (wrapped options for the selected series)." />
-              </label>
-              <Input
-                isReadOnly
-                value={mounted ? (erc20Address ?? "") : ""}
-                classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
-              />
-            </div>
-            <div className="col-span-12 md:col-span-5">
-              <label className="block mb-1 text-sm font-medium">
-                Making Amount{" "}
-                <Info tip="How many maker ERC-20 units to sell. (1 option = 1e18 units)" />
-              </label>
-              <Input
-                placeholder="1000"
-                value={makingAmount}
-                onChange={(e) => setMakingAmount(e.target.value)}
-                classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Taker */}
-        <div className="col-span-12 md:col-span-6 rounded-2xl border border-default-200/50 bg-content1 p-4">
-          <div className="mb-2 text-sm font-medium">Buy (Taker)</div>
-          <div className="grid grid-cols-12 gap-3 items-end">
-            <div className="col-span-12 md:col-span-7">
-              <label className="block mb-1 text-sm font-medium">
-                Taker Token <Info tip="Token you want to receive." />
-              </label>
-              <Select
-                selectionMode="single"
-                defaultSelectedKeys={defaultTaker ? new Set([defaultTaker]) : undefined}
-                selectedKeys={mounted && takerSym ? new Set([takerSym]) : undefined}
-                onSelectionChange={(keys) => {
-                  const next = Array.from(keys as Set<React.Key>)[0] as string | undefined;
-                  setTakerSym(next);
-                }}
-                classNames={{
-                  trigger: "h-12 bg-default-100",
-                  value: "text-sm",
-                }}
-              >
-                {QUOTE_TOKENS.map((t) => (
-                  <SelectItem
-                    key={t.symbol}
-                    value={t.symbol}
-                    textValue={`${t.symbol} — ${t.name}`}
-                  >
-                    {t.symbol} — {t.name}
-                  </SelectItem>
-                ))}
-              </Select>
-            </div>
-
-            <div className="col-span-12 md:col-span-5">
-              <label className="block mb-1 text-sm font-medium">
-                Taking Amount <Info tip="Total amount of the taker token you want." />
-              </label>
-              <Input
-                placeholder="500"
-                value={takingAmount}
-                onChange={(e) => setTakingAmount(e.target.value)}
-                classNames={{ inputWrapper: "h-12 bg-default-100", input: "text-sm" }}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Implied price */}
-      <div className="mt-3 text-default-500 text-sm">
-        {(() => {
-          const m = Number(makingAmount || "0");
-          const t = Number(takingAmount || "0");
-          const ok = Number.isFinite(m) && Number.isFinite(t) && m > 0;
-          const implied = ok ? t / m : 0;
-          return ok ? (
-            <>
-              Implied price:{" "}
-              <span className="font-mono">
-                {implied.toLocaleString(undefined, { maximumFractionDigits: 8 })}
-              </span>{" "}
-              {takerToken?.symbol} per maker-unit
-            </>
-          ) : (
-            <>Enter amounts to see implied price.</>
-          );
-        })()}
-      </div>
-
-      <Spacer y={3} />
-
-      {/* Actions */}
-      <div className="flex flex-wrap gap-3">
-        <Button
-          variant="bordered"
-          isDisabled={!mounted || !erc20Address || needsWrapper}
-          isLoading={isApproving}
-          onPress={async () => {
-            await approve();
-            await refetchAllowance();
-          }}
+      {/* Notices */}
+      {notices.map((m, i) => (
+        <div
+          key={i}
+          className="p-2 text-sm text-warning border border-warning rounded"
         >
-          Approve 1inch (maker)
-        </Button>
+          {m}
+        </div>
+      ))}
+
+      {/* Series selector */}
+      <div>
+        <label className="text-sm font-medium mb-1 block">
+          Series <Info tip="Unexpired series only" />
+        </label>
+        {loadingSeries ? (
+          <div className="flex items-center gap-2">
+            <Spinner size="sm" /> Loading…
+          </div>
+        ) : (
+          <Select
+            selectionMode="single"
+            disallowEmptySelection
+            selectedKeys={
+              selectedSeriesId
+                ? new Set([selectedSeriesId.toString()])
+                : new Set()
+            }
+            onSelectionChange={(keys) => {
+              const v = Array.from(keys as Set<string>)[0];
+              setSelectedSeriesId(BigInt(v));
+            }}
+            classNames={{ trigger: "h-12 bg-default-100", value: "text-sm" }}
+          >
+            {activeSeries.map((s) => (
+              <SelectItem
+                key={s.id.toString()}
+                value={s.id.toString()}
+                textValue={`${s.id} • K ${formatUnits(
+                  s.strike,
+                  18
+                )} • exp ${formatDateUTC(s.expiry)}`}
+              >
+                <div className="flex flex-col">
+                  <span className="font-mono">{s.id.toString()}</span>
+                  <span className="text-xs text-default-500">
+                    K {formatUnits(s.strike, 18)} • exp{" "}
+                    {formatDateUTC(s.expiry)}
+                  </span>
+                </div>
+              </SelectItem>
+            ))}
+          </Select>
+        )}
+      </div>
+
+      {/* Approve proxy */}
+      <Button
+        onPress={onApproveProxy}
+        isDisabled={isApprovedForAll || !address}
+        className="h-12"
+      >
+        {isApprovedForAll ? "Proxy Approved" : "Approve ERC1155 Proxy"}
+      </Button>
+
+      {/* Order inputs */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+        <div className="md:col-span-1">
+          <label className="text-sm">Qty to Sell</label>
+          <Input
+            placeholder="e.g. 1"
+            value={qtyStr}
+            onChange={(e) => setQtyStr(e.target.value)}
+            classNames={{
+              inputWrapper: "h-12 bg-default-100",
+              input: "text-sm",
+            }}
+          />
+        </div>
+
+        <div className="md:col-span-1">
+          <label className="text-sm">Receive Token</label>
+          <Select
+            selectionMode="single"
+            selectedKeys={new Set([takerSym])}
+            onSelectionChange={(keys) =>
+              setTakerSym(Array.from(keys as Set<string>)[0] as any)
+            }
+            classNames={{
+              trigger: "h-12 bg-default-100",
+              value: "text-sm",
+            }}
+          >
+            {["USDC", "WXDAI", "WETH"].map((sym) => (
+              <SelectItem key={sym} value={sym} textValue={sym}>
+                {sym}
+              </SelectItem>
+            ))}
+          </Select>
+        </div>
+
+        <div className="md:col-span-1">
+          <label className="text-sm">Receive Amount</label>
+          <Input
+            placeholder="e.g. 10"
+            value={takerAmountStr}
+            onChange={(e) => setTakerAmountStr(e.target.value)}
+            classNames={{
+              inputWrapper: "h-12 bg-default-100",
+              input: "text-sm",
+            }}
+          />
+        </div>
+
         <Button
           color="primary"
-          isDisabled={!mounted || !valid || submitting}
+          onPress={onCreateOrder}
           isLoading={submitting}
-          onPress={handleSubmit}
+          isDisabled={
+            submitting || !isConnected || !isApprovedForAll || !selectedSeriesId
+          }
+          className="h-12 w-full"
         >
-          {submitting ? "Submitting..." : "Create Order"}
+          Create Order
         </Button>
       </div>
 
       {/* Order hash */}
       {orderHash && (
-        <div className="mt-5 space-y-2">
-          <div className="text-sm text-default-500">Order Hash</div>
-          <Snippet variant="flat" className="max-w-full break-all">
-            {orderHash}
-          </Snippet>
+        <div className="mt-4">
+          <div className="text-sm text-default-500">Order Hash:</div>
+          <div className="font-mono break-all">{orderHash}</div>
         </div>
       )}
 
-      {/* Your open orders */}
-      {ordersLoading ? (
-        <div className="mt-6 flex items-center gap-2 text-sm text-default-500">
-          <Spinner size="sm" /> Loading your open orders…
-        </div>
-      ) : openOrders?.length > 0 ? (
+      {/* Open orders */}
+      {openOrders.length > 0 && (
         <div className="mt-6">
-          <h4 className="font-medium mb-2">Your open orders</h4>
-          <div className="rounded-xl border border-default-200/50 bg-content2 p-3 text-sm overflow-x-auto">
-            <table className="min-w-full">
+          <h4 className="font-medium mb-2">Your Open Orders</h4>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
               <thead className="text-default-500">
                 <tr>
-                  <th className="text-left p-2">hash</th>
-                  <th className="text-left p-2">makerAsset</th>
-                  <th className="text-left p-2">takerAsset</th>
-                  <th className="text-left p-2">making</th>
-                  <th className="text-left p-2">taking</th>
-                  <th className="text-left p-2">status</th>
+                  <th className="p-2 text-left">Hash</th>
+                  <th className="p-2 text-left">MakerAsset</th>
+                  <th className="p-2 text-left">TakerAsset</th>
+                  <th className="p-2 text-left">Making</th>
+                  <th className="p-2 text-left">Taking</th>
+                  <th className="p-2 text-left">Status</th>
                 </tr>
               </thead>
               <tbody>
-                {openOrders.map((o: any) => (
-                  <tr key={o.hash} className="border-t border-default-200/50">
-                    <td className="p-2">{o.hash}</td>
+                {openOrders.map((o) => (
+                  <tr key={o.hash} className="border-t">
+                    <td className="p-2 font-mono">{o.hash}</td>
                     <td className="p-2">{o.makerAsset}</td>
                     <td className="p-2">{o.takerAsset}</td>
                     <td className="p-2">{o.makingAmount}</td>
@@ -700,7 +430,7 @@ export default function CreateLimitOrder() {
             </table>
           </div>
         </div>
-      ) : null}
+      )}
     </Card>
   );
 }

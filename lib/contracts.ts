@@ -1,49 +1,39 @@
+// lib/contracts.ts
 /* eslint-disable @typescript-eslint/no-unused-vars */
 
 import type { Address } from "viem";
 
-/* ----------------------------- Env & Constants ---------------------------- */
+/* ----------------------------- Hardcoded Constants ---------------------------- */
 
-const asAddress = (v?: string) =>
-  (v?.match(/^0x[a-fA-F0-9]{40}$/)
-    ? (v as `0x${string}`)
-    : ("0x0000000000000000000000000000000000000000" as const));
+export const CHAIN_ID = 100; // Gnosis Chain
+export const RPC_URL = "https://rpc.gnosis.gateway.fm";
+export const EXPLORER_URL = "https://gnosisscan.io";
 
-export const CHAIN_ID = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? "100"); // Gnosis (100) by default
-export const RPC_URL =
-  process.env.NEXT_PUBLIC_RPC_URL ?? "https://rpc.gnosis.gateway.fm";
+/** 1inch Limit Order Protocol v4 (Gnosis) - HARDCODED */
+export const LOP_V4_GNOSIS = "0x111111125421ca6dc452d289314280a0f8842a65" as const;
 
-export const EXPLORER_URL =
-  process.env.NEXT_PUBLIC_EXPLORER ?? "https://gnosisscan.io";
+/** 1inch Orderbook API (v4) - HARDCODED */
+export const ORDERBOOK_API_BASE = "https://orderbook-api.1inch.io";
 
-/** 1inch Limit Order Protocol v4 (Gnosis) */
-export const LOP_V4_GNOSIS =
-  asAddress(process.env.NEXT_PUBLIC_LOP) ||
-  ("0x111111125421ca6dc452d289314280a0f8842a65" as const);
+/** Public 1inch key - HARDCODED */
+export const ONEINCH_AUTH_KEY = "ODrGxQos9xJl5z1SDacSSkmOVkFTtWyZ";
 
-/** 1inch Orderbook API (v4) */
-export const ORDERBOOK_API_BASE =
-  process.env.NEXT_PUBLIC_ONEINCH_ORDERBOOK_API ??
-  "https://orderbook-api.1inch.io";
+/** Core contracts - HARDCODED */
+export const VAULT_ADDRESS = "0xB4048ce69523CF463bC37b648279e6EF66CaEBAf" as const;
+export const CALLTOKEN_ADDRESS = "0x7b964e3dC49DAcB3971CA49f53629e2e11885016" as const;
 
-/** Public 1inch key for any client-side calls you might make (optional) */
-export const ONEINCH_AUTH_KEY = process.env.NEXT_PUBLIC_ONEINCH_AUTH_KEY ?? "";
+/** ERC-1155 proxy - HARDCODED */
+export const ERC1155_PROXY_ADDRESS = "0x03F916C97e7DF446aB916776313299C13b533f91" as const;
 
-/** Core contracts (your deployments) */
-export const VAULT_ADDRESS = asAddress(process.env.NEXT_PUBLIC_VAULT_ADDRESS);
-export const CALLTOKEN_ADDRESS = asAddress(
-  process.env.NEXT_PUBLIC_CALLTOKEN_ADDRESS
-);
+/** Oracle for GNO/WXDAI - HARDCODED */
+export const ORACLE_GNO_WXDAI = "0xf3FcEd095bDD651b1Ea24F46EE5645Ab4169e955" as const;
 
-/** NEW: ERC-1155 proxy to adapt safeTransferFrom to IERC20.transferFrom semantics */
-export const ERC1155_PROXY_ADDRESS = asAddress(
-  process.env.NEXT_PUBLIC_ERC1155_PROXY_ADDRESS
-);
-
-/** Optional: oracle for GNO/WXDAI (1e18) */
-export const ORACLE_GNO_WXDAI = asAddress(
-  process.env.NEXT_PUBLIC_ORACLE_GNO_WXDAI
-);
+/** Token addresses - HARDCODED */
+export const TOKEN_ADDRESSES = {
+  WXDAI: "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d" as const,
+  USDC: "0xddafbb505ad214d7b80b1f830fccc89b60fb7a83" as const,
+  WETH: "0x6A023CCd1ff6F2045C3309768eAd9E68F978f6e1" as const,
+};
 
 /* --------------------------------- ABIs ---------------------------------- */
 /** OptionsVault ABI (subset focused on what the app calls/reads) */
@@ -475,4 +465,5 @@ export const ADDRESSES = {
   callToken1155: CALLTOKEN_ADDRESS,
   erc1155Proxy: ERC1155_PROXY_ADDRESS,
   oracleGnoWx: ORACLE_GNO_WXDAI,
+  tokens: TOKEN_ADDRESSES,
 } as const;

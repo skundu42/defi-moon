@@ -1,40 +1,53 @@
 // lib/oneInch.ts
 import {
-  Api,
-  LimitOrder,
-  MakerTraits,
-  Address as OneInchAddress,
-} from "@1inch/limit-order-sdk";
-import { AxiosProviderConnector } from "@1inch/limit-order-sdk/axios";
-import { Address as ViemAddress, encodeAbiParameters, Hex } from "viem";
-import {
-  LOP_V4_GNOSIS,
-  ERC1155_PROXY_ADDRESS,
-} from "@/lib/contracts";
+  Address as ViemAddress,
+  encodeAbiParameters,
+  keccak256,
+  encodePacked,
+  Hex,
+} from "viem";
 
-/* ----------------------------- Constants / API ----------------------------- */
+/* ----------------------------- Constants ----------------------------- */
 
-export const NETWORK_ID = 100; // Gnosis Chain Mainnet
+export const NETWORK_ID = 100; // Gnosis Chain
+export const CHAIN_ID = 100n;
 
-export function getOneInchApi() {
-  const authKey =
-    process.env.ONEINCH_API_KEY || process.env.NEXT_PUBLIC_ONEINCH_AUTH_KEY;
-  if (!authKey) {
-    throw new Error(
-      "Missing ONEINCH_API_KEY (or NEXT_PUBLIC_ONEINCH_AUTH_KEY) in environment"
-    );
-  }
-  return new Api({
-    networkId: NETWORK_ID,
-    authKey,
-    httpConnector: new AxiosProviderConnector(),
-  });
+// 1inch Limit Order Protocol v4 on Gnosis
+export const LOP_V4_ADDRESS = "0x111111125421ca6dc452d289314280a0f8842a65" as const;
+
+// ERC1155 Proxy Address
+export const ERC1155_PROXY_ADDRESS = "0x03F916C97e7DF446aB916776313299C13b533f91" as const;
+
+// Bitwise flags for MakerTraits
+const MAKER_AMOUNT_FLAG = 1n << 255n;
+const USE_PERMIT2_FLAG = 1n << 254n;
+const UNWRAP_WETH_FLAG = 1n << 253n;
+const SKIP_ORDER_PERMIT_FLAG = 1n << 252n;
+const USE_PERMIT_FLAG = 1n << 251n;
+const NO_PARTIAL_FILLS_FLAG = 1n << 250n;
+
+// Expiration time mask (40 bits starting at position 210)
+const EXPIRATION_MASK = ((1n << 40n) - 1n) << 210n;
+
+/* -------------------------------- Types -------------------------------- */
+
+export interface Order {
+  salt: bigint;
+  maker: ViemAddress;
+  receiver: ViemAddress;
+  makerAsset: ViemAddress;
+  takerAsset: ViemAddress;
+  makingAmount: bigint;
+  takingAmount: bigint;
+  makerTraits: bigint;
 }
 
-/* --------------------------------- Types ---------------------------------- */
+export interface OrderWithExtension extends Order {
+  extension: Hex;
+}
 
 export type BuildOrderArgs1155 = {
-  makerAddress: string;
+  makerAddress: ViemAddress;
   maker1155: {
     token: ViemAddress;
     tokenId: bigint;
@@ -44,60 +57,59 @@ export type BuildOrderArgs1155 = {
   takerAsset: ViemAddress;
   takerAmount: bigint;
   expirationSec?: number;
-  allowedSender?: ViemAddress;
+  receiver?: ViemAddress;
+  allowPartialFill?: boolean;
 };
 
-export type BuiltOrder1155 = {
-  order: LimitOrder;
-  typedData: any;
-  extension: {
-    makerAssetSuffix: Hex;
-    takerAssetSuffix: Hex;
-  };
-};
+/* ----------------------------- Order Builder ----------------------------- */
 
-/* ---------------------- Build ERC-1155 LimitOrder ------------------------- */
+/**
+ * Builds maker traits with expiration and other flags
+ */
+function buildMakerTraits(
+  expirationSec: number,
+  allowPartialFill: boolean = true
+): bigint {
+  const now = Math.floor(Date.now() / 1000);
+  const expiration = BigInt(now + expirationSec);
+  
+  let traits = 0n;
+  
+  // Set expiration (40 bits at position 210)
+  traits |= (expiration & ((1n << 40n) - 1n)) << 210n;
+  
+  // Set flags
+  if (!allowPartialFill) {
+    traits |= NO_PARTIAL_FILLS_FLAG;
+  }
+  
+  return traits;
+}
 
+/**
+ * Builds an ERC-1155 limit order for direct contract interaction
+ */
 export function buildLimitOrder1155({
   makerAddress,
   maker1155: { token, tokenId, amount, data },
   takerAsset,
   takerAmount,
   expirationSec = 2 * 60 * 60,
-  allowedSender,
-}: BuildOrderArgs1155): BuiltOrder1155 {
-  if (
-    !ERC1155_PROXY_ADDRESS ||
-    ERC1155_PROXY_ADDRESS ===
-      "0x0000000000000000000000000000000000000000"
-  ) {
-    throw new Error(
-      "ERC1155 proxy address is not set. Provide NEXT_PUBLIC_ERC1155_PROXY_ADDRESS in your .env"
-    );
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-  const expiration = BigInt(now + expirationSec);
-
-  const traits = MakerTraits.default()
-    .withExpiration(expiration)
-    .withAllowedSender(
-      new OneInchAddress(allowedSender ?? LOP_V4_GNOSIS)
-    );
-
-  const order = new LimitOrder(
-    {
-      makerAsset: new OneInchAddress(ERC1155_PROXY_ADDRESS),
-      takerAsset: new OneInchAddress(takerAsset),
-      makingAmount: amount,      // maps to ERC1155 “value”
-      takingAmount: takerAmount, // ERC20 units wanted
-      maker: new OneInchAddress(makerAddress),
-    },
-    traits
-  );
-
-  // encode (id, token, data) for the proxy’s suffix calldata
-  const makerAssetSuffix = encodeAbiParameters(
+  receiver,
+  allowPartialFill = true,
+}: BuildOrderArgs1155): {
+  order: OrderWithExtension;
+  typedData: any;
+  orderHash: Hex;
+} {
+  // Generate salt
+  const salt = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+  
+  // Build maker traits
+  const makerTraits = buildMakerTraits(expirationSec, allowPartialFill);
+  
+  // Build extension data for ERC1155
+  const extension = encodeAbiParameters(
     [
       { name: "id", type: "uint256" },
       { name: "token", type: "address" },
@@ -105,44 +117,243 @@ export function buildLimitOrder1155({
     ],
     [tokenId, token, (data ?? "0x") as Hex]
   );
-
-  const extension = {
-    makerAssetSuffix,
-    takerAssetSuffix: "0x" as Hex,
+  
+  // Create order struct
+  const order: OrderWithExtension = {
+    salt,
+    maker: makerAddress,
+    receiver: receiver || "0x0000000000000000000000000000000000000000",
+    makerAsset: ERC1155_PROXY_ADDRESS,
+    takerAsset,
+    makingAmount: amount,
+    takingAmount: takerAmount,
+    makerTraits,
+    extension,
   };
-
-  const typedData = order.getTypedData(NETWORK_ID);
-
-  return { order, typedData, extension };
+  
+  // Create EIP-712 typed data
+  const typedData = {
+    domain: {
+      name: "1inch Limit Order Protocol",
+      version: "4",
+      chainId: CHAIN_ID,
+      verifyingContract: LOP_V4_ADDRESS as ViemAddress,
+    },
+    types: {
+      Order: [
+        { name: "salt", type: "uint256" },
+        { name: "maker", type: "address" },
+        { name: "receiver", type: "address" },
+        { name: "makerAsset", type: "address" },
+        { name: "takerAsset", type: "address" },
+        { name: "makingAmount", type: "uint256" },
+        { name: "takingAmount", type: "uint256" },
+        { name: "makerTraits", type: "uint256" },
+      ],
+    },
+    primaryType: "Order" as const,
+    message: {
+      salt: order.salt.toString(),
+      maker: order.maker,
+      receiver: order.receiver,
+      makerAsset: order.makerAsset,
+      takerAsset: order.takerAsset,
+      makingAmount: order.makingAmount.toString(),
+      takingAmount: order.takingAmount.toString(),
+      makerTraits: order.makerTraits.toString(),
+    },
+  };
+  
+  // Calculate order hash
+  const orderHash = getOrderHash(order);
+  
+  return { order, typedData, orderHash };
 }
 
-/* ----------------------------- Submit / Fetch ----------------------------- */
+/**
+ * Calculates the order hash according to 1inch protocol
+ */
+export function getOrderHash(order: Order): Hex {
+  const encoded = encodeAbiParameters(
+    [
+      { name: "salt", type: "uint256" },
+      { name: "maker", type: "address" },
+      { name: "receiver", type: "address" },
+      { name: "makerAsset", type: "address" },
+      { name: "takerAsset", type: "address" },
+      { name: "makingAmount", type: "uint256" },
+      { name: "takingAmount", type: "uint256" },
+      { name: "makerTraits", type: "uint256" },
+    ],
+    [
+      order.salt,
+      order.maker,
+      order.receiver,
+      order.makerAsset,
+      order.takerAsset,
+      order.makingAmount,
+      order.takingAmount,
+      order.makerTraits,
+    ]
+  );
+  
+  return keccak256(encoded);
+}
+
+/* ----------------------------- Contract ABIs ----------------------------- */
+
+export const lopV4Abi = [
+  // Fill order with extension
+  {
+    type: "function",
+    name: "fillOrderExt",
+    stateMutability: "payable",
+    inputs: [
+      {
+        name: "order",
+        type: "tuple",
+        components: [
+          { name: "salt", type: "uint256" },
+          { name: "maker", type: "address" },
+          { name: "receiver", type: "address" },
+          { name: "makerAsset", type: "address" },
+          { name: "takerAsset", type: "address" },
+          { name: "makingAmount", type: "uint256" },
+          { name: "takingAmount", type: "uint256" },
+          { name: "makerTraits", type: "uint256" },
+        ],
+      },
+      { name: "signature", type: "bytes" },
+      { name: "extension", type: "bytes" },
+      { name: "makingAmount", type: "uint256" },
+      { name: "takingAmount", type: "uint256" },
+      { name: "skipPermitAndThreshold", type: "uint256" },
+    ],
+    outputs: [
+      { name: "actualMakingAmount", type: "uint256" },
+      { name: "actualTakingAmount", type: "uint256" },
+      { name: "orderHash", type: "bytes32" },
+    ],
+  },
+  // Cancel order
+  {
+    type: "function",
+    name: "cancelOrder",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "makerTraits", type: "uint256" },
+      { name: "orderHash", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+  // Batch cancel
+  {
+    type: "function",
+    name: "batchCancelOrders",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "makerTraits", type: "uint256[]" },
+      { name: "orderHashes", type: "bytes32[]" },
+    ],
+    outputs: [],
+  },
+  // Check if order is valid
+  {
+    type: "function",
+    name: "checkPredicate",
+    stateMutability: "view",
+    inputs: [
+      {
+        name: "order",
+        type: "tuple",
+        components: [
+          { name: "salt", type: "uint256" },
+          { name: "maker", type: "address" },
+          { name: "receiver", type: "address" },
+          { name: "makerAsset", type: "address" },
+          { name: "takerAsset", type: "address" },
+          { name: "makingAmount", type: "uint256" },
+          { name: "takingAmount", type: "uint256" },
+          { name: "makerTraits", type: "uint256" },
+        ],
+      },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  // Get remaining amount
+  {
+    type: "function",
+    name: "remaining",
+    stateMutability: "view",
+    inputs: [{ name: "orderHash", type: "bytes32" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  // Events
+  {
+    type: "event",
+    name: "OrderFilled",
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: "orderHash", type: "bytes32" },
+      { indexed: false, name: "makingAmount", type: "uint256" },
+      { indexed: false, name: "takingAmount", type: "uint256" },
+    ],
+  },
+  {
+    type: "event",
+    name: "OrderCancelled",
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: "orderHash", type: "bytes32" },
+    ],
+  },
+] as const;
+
+/* ------------------------- Helper Functions -------------------------- */
 
 /**
- * Submit a signed ERC-1155 order (with its extension) to 1inch’s orderbook.
+ * Encodes the order for contract interaction
  */
-export async function submitSignedOrder(
-  built: BuiltOrder1155,
-  signature: `0x${string}`
-) {
-  const api = getOneInchApi();
-  try {
-    // v4+ SDKs accept the extension option here
-    // @ts-expect-error extension requires v4+ support
-    await api.submitOrder(built.order, signature, {
-      extension: built.extension,
-    });
-  } catch (e: any) {
-    throw new Error(
-      `Failed to submit 1155 order with extension: ${e?.message ?? e}`
-    );
-  }
+export function encodeOrder(order: Order): Hex {
+  return encodeAbiParameters(
+    [
+      {
+        type: "tuple",
+        components: [
+          { name: "salt", type: "uint256" },
+          { name: "maker", type: "address" },
+          { name: "receiver", type: "address" },
+          { name: "makerAsset", type: "address" },
+          { name: "takerAsset", type: "address" },
+          { name: "makingAmount", type: "uint256" },
+          { name: "takingAmount", type: "uint256" },
+          { name: "makerTraits", type: "uint256" },
+        ],
+      },
+    ],
+    [order]
+  );
 }
 
 /**
- * Fetch all open orders by a maker.
+ * Validates if an order is still active (not expired)
  */
-export async function fetchOrdersByMaker(makerAddress: string) {
-  const api = getOneInchApi();
-  return api.getOrdersByMaker(new OneInchAddress(makerAddress));
+export function isOrderActive(makerTraits: bigint): boolean {
+  const expiration = (makerTraits & EXPIRATION_MASK) >> 210n;
+  const now = BigInt(Math.floor(Date.now() / 1000));
+  return expiration === 0n || expiration > now;
+}
+
+/**
+ * Extracts expiration timestamp from maker traits
+ */
+export function getExpiration(makerTraits: bigint): bigint {
+  return (makerTraits & EXPIRATION_MASK) >> 210n;
+}
+
+/**
+ * Checks if order allows partial fills
+ */
+export function allowsPartialFill(makerTraits: bigint): boolean {
+  return (makerTraits & NO_PARTIAL_FILLS_FLAG) === 0n;
 }

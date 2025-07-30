@@ -1,21 +1,21 @@
 "use client";
 
-import DepositWithdraw from "@/components/DepositWithdraw";
-import CreateLimitOrder from "@/components/CreateLimitOrder";
+import Orderbook from "@/components/Orderbook";
+import TakerPortfolio from "@/components/TakerPortfolio";
 import SettleExerciseReclaim from "@/components/SettleExerciseReclaim";
 import SeriesTable from "@/components/SeriesTable";
 
-export default function VaultPage() {
+export default function TakerPage() {
   return (
     <section className="mx-auto max-w-6xl py-10 md:py-14 space-y-10">
       {/* Header */}
       <header className="flex flex-col gap-3">
         <h1 className="text-3xl md:text-4xl font-semibold tracking-tight">
-          Covered Call Vault
+          Options Taker
         </h1>
         <p className="text-default-500 max-w-2xl">
-          Manage collateral, mint options, create 1inch limit orders, explore the orderbook, and handle
-          settlement workflows — all in one place.
+          Browse available call options, fill limit orders, manage your portfolio, and exercise 
+          your options when profitable.
         </p>
 
         <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -28,28 +28,27 @@ export default function VaultPage() {
         </div>
       </header>
 
-      {/* Series Table */}
+      {/* Series Overview */}
       <div className="space-y-3">
-        <h2 className="text-lg font-medium">Series</h2>
+        <h2 className="text-lg font-medium">Available Series</h2>
         <SeriesTable />
       </div>
 
-      {/* Collateral */}
+      {/* Browse & Fill Orders */}
       <div className="space-y-3">
-        <h2 className="text-lg font-medium">Collateral</h2>
-        <DepositWithdraw />
+        <h2 className="text-lg font-medium">Orderbook</h2>
+        <Orderbook />
       </div>
 
-      {/* Create 1inch Order */}
+      {/* Portfolio Management */}
       <div className="space-y-3">
-        <h2 className="text-lg font-medium">Create 1inch Order</h2>
-        <CreateLimitOrder />
+        <h2 className="text-lg font-medium">Your Portfolio</h2>
+        <TakerPortfolio />
       </div>
 
-
-      {/* Post-expiry lifecycle */}
-      <div className="space-y-3">
-        <h2 className="text-lg font-medium">Settle / Exercise / Reclaim</h2>
+      {/* Exercise & Settlement */}
+      <div className="space-y-3" data-section="exercise">
+        <h2 className="text-lg font-medium">Exercise / Settlement</h2>
         <SettleExerciseReclaim />
       </div>
     </section>

@@ -70,6 +70,7 @@ const DECIMALS: Record<string, number> = {
   WXDAI: 18,
   USDC: 6,
   WETH: 18,
+  GNO: 18,
 };
 
 export default function CreateLimitOrder() {
@@ -77,6 +78,7 @@ export default function CreateLimitOrder() {
   const { address, isConnected } = useAccount();
   const { signTypedDataAsync } = useSignTypedData();
   const publicClient = usePublicClient();
+  const { writeContractAsync } = useWriteContract();
 
   // --- load all series onchain ---
   const [allSeries, setAllSeries] = useState<

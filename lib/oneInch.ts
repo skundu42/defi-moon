@@ -203,7 +203,38 @@ export function getOrderHash(order: Order): Hex {
 /* ----------------------------- Contract ABIs ----------------------------- */
 
 export const lopV4Abi = [
-  // Fill order with extension
+  // Standard fill order
+  {
+    type: "function",
+    name: "fillOrder",
+    stateMutability: "payable",
+    inputs: [
+      {
+        name: "order",
+        type: "tuple",
+        components: [
+          { name: "salt", type: "uint256" },
+          { name: "maker", type: "address" },
+          { name: "receiver", type: "address" },
+          { name: "makerAsset", type: "address" },
+          { name: "takerAsset", type: "address" },
+          { name: "makingAmount", type: "uint256" },
+          { name: "takingAmount", type: "uint256" },
+          { name: "makerTraits", type: "uint256" },
+        ],
+      },
+      { name: "signature", type: "bytes" },
+      { name: "makingAmount", type: "uint256" },
+      { name: "takingAmount", type: "uint256" },
+      { name: "extension", type: "bytes" },
+    ],
+    outputs: [
+      { name: "actualMakingAmount", type: "uint256" },
+      { name: "actualTakingAmount", type: "uint256" },
+      { name: "orderHash", type: "bytes32" },
+    ],
+  },
+  // Fill order with extension (alternative)
   {
     type: "function",
     name: "fillOrderExt",
@@ -286,6 +317,31 @@ export const lopV4Abi = [
     name: "remaining",
     stateMutability: "view",
     inputs: [{ name: "orderHash", type: "bytes32" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  // Get remaining amount with order
+  {
+    type: "function",
+    name: "remainingWithOrder",
+    stateMutability: "view",
+    inputs: [
+      {
+        name: "order",
+        type: "tuple",
+        components: [
+          { name: "salt", type: "uint256" },
+          { name: "maker", type: "address" },
+          { name: "receiver", type: "address" },
+          { name: "makerAsset", type: "address" },
+          { name: "takerAsset", type: "address" },
+          { name: "makingAmount", type: "uint256" },
+          { name: "takingAmount", type: "uint256" },
+          { name: "makerTraits", type: "uint256" },
+        ],
+      },
+      { name: "signature", type: "bytes" },
+      { name: "extension", type: "bytes" },
+    ],
     outputs: [{ name: "", type: "uint256" }],
   },
   // Events

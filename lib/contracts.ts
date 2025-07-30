@@ -33,6 +33,7 @@ export const TOKEN_ADDRESSES = {
   WXDAI: "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d" as const,
   USDC: "0xddafbb505ad214d7b80b1f830fccc89b60fb7a83" as const,
   WETH: "0x6A023CCd1ff6F2045C3309768eAd9E68F978f6e1" as const,
+  GNO: "0x9C58BAcC331c9aa871AFD802DB6379a98e80CEdb" as const,
 };
 
 /* --------------------------------- ABIs ---------------------------------- */

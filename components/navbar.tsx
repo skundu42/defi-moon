@@ -21,11 +21,10 @@ import { siteConfig } from "@/config/site";
 import { GithubIcon } from "@/components/icons";
 
 const navLinks: Array<{ label: string; href: string }> = [
-  { label: "Maker", href: "/" },
+  { label: "Maker", href: "/maker" },
   { label: "Taker", href: "/taker" },
   { label: "Portfolio", href: "/portfolio" },
   { label: "Orderbook", href: "/orderbook" },
-  { label: "How it works", href: "/how-it-works" },
   { label: "Admin", href: "/admin" },
 ];
 

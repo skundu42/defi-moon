@@ -1,53 +1,31 @@
-# Next.js & HeroUI Template
+✅ Implemented Features
+Core Covered Call Mechanics
 
-This is a template for creating applications using Next.js 14 (app directory) and HeroUI (v2).
+✅ Collateral Management: Full deposit/withdraw system with free vs locked collateral tracking
+✅ Option Minting: Can mint call options backed by deposited collateral
+✅ Series Definition: Create custom option series (underlying, strike, expiry, collateral ratio)
+✅ Settlement System: Automated settlement at expiry with oracle price feeds
+✅ Exercise Mechanism: Option holders can exercise ITM options
+✅ Collateral Reclaim: Makers can reclaim unused collateral post-settlement
 
-[Try it on CodeSandbox](https://githubbox.com/heroui-inc/heroui/next-app-template)
+Trading Infrastructure
 
-## Technologies Used
+✅ Limit Order System: Integration with 1inch LOP v4 for decentralized orderbook
+✅ ERC-1155 Options: Options as transferable NFT-like tokens
+✅ Multi-Token Support: Accept various payment tokens (WXDAI, USDC, etc.)
+✅ Partial Fills: Support for partial order execution
+✅ Order Management: Create, cancel, and track orders
 
-- [Next.js 14](https://nextjs.org/docs/getting-started)
-- [HeroUI v2](https://heroui.com/)
-- [Tailwind CSS](https://tailwindcss.com/)
-- [Tailwind Variants](https://tailwind-variants.org)
-- [TypeScript](https://www.typescriptlang.org/)
-- [Framer Motion](https://www.framer.com/motion/)
-- [next-themes](https://github.com/pacocoursey/next-themes)
+Portfolio & Analytics
 
-## How to Use
+✅ Maker Portfolio: Track minted positions, locked collateral, premiums received
+✅ Taker Portfolio: Track purchased options, exercise opportunities
+✅ PnL Tracking: Realized and unrealized P&L calculation
+✅ Position Management: Comprehensive position tracking across multiple series
 
-### Use the template with create-next-app
+Risk Management
 
-To create a new project based on this template using `create-next-app`, run the following command:
-
-```bash
-npx create-next-app -e https://github.com/heroui-inc/next-app-template
-```
-
-### Install dependencies
-
-You can use one of them `npm`, `yarn`, `pnpm`, `bun`, Example using `npm`:
-
-```bash
-npm install
-```
-
-### Run the development server
-
-```bash
-npm run dev
-```
-
-### Setup pnpm (optional)
-
-If you are using `pnpm`, you need to add the following code to your `.npmrc` file:
-
-```bash
-public-hoist-pattern[]=*@heroui/*
-```
-
-After modifying the `.npmrc` file, you need to run `pnpm install` again to ensure that the dependencies are installed correctly.
-
-## License
-
-Licensed under the [MIT license](https://github.com/heroui-inc/next-app-template/blob/main/LICENSE).
+✅ Collateral Requirements: Enforce minimum collateral per option
+✅ Free Collateral Tracking: Prevent over-leveraging
+✅ Oracle Integration: Price feeds for settlement
+✅ Access Controls: Admin roles for system management

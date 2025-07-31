@@ -1,179 +1,154 @@
 // lib/oneInch.ts
-import {
-  Address as ViemAddress,
-  encodeAbiParameters,
-  keccak256,
-  encodePacked,
-  Hex,
-} from "viem";
+import { Address, encodeAbiParameters, keccak256 } from "viem";
 
-/* ----------------------------- Constants ----------------------------- */
-
-export const NETWORK_ID = 100; // Gnosis Chain
-export const CHAIN_ID = 100n;
-
-// 1inch Limit Order Protocol v4 on Gnosis
+// 1inch Limit Order Protocol v4 address on Gnosis Chain
 export const LOP_V4_ADDRESS = "0x111111125421ca6dc452d289314280a0f8842a65" as const;
 
-// ERC1155 Proxy Address
-export const ERC1155_PROXY_ADDRESS = "0x03F916C97e7DF446aB916776313299C13b533f91" as const;
+// TypedData domain for 1inch LOP v4
+const DOMAIN = {
+  name: "1inch Limit Order Protocol",
+  version: "4",
+  chainId: 100, // Gnosis Chain
+  verifyingContract: LOP_V4_ADDRESS as Address,
+} as const;
 
-// Bitwise flags for MakerTraits
-const MAKER_AMOUNT_FLAG = 1n << 255n;
-const USE_PERMIT2_FLAG = 1n << 254n;
-const UNWRAP_WETH_FLAG = 1n << 253n;
-const SKIP_ORDER_PERMIT_FLAG = 1n << 252n;
-const USE_PERMIT_FLAG = 1n << 251n;
-const NO_PARTIAL_FILLS_FLAG = 1n << 250n;
+// Order struct types for EIP-712
+const ORDER_TYPES = {
+  Order: [
+    { name: "salt", type: "uint256" },
+    { name: "maker", type: "address" },
+    { name: "receiver", type: "address" },
+    { name: "makerAsset", type: "address" },
+    { name: "takerAsset", type: "address" },
+    { name: "makingAmount", type: "uint256" },
+    { name: "takingAmount", type: "uint256" },
+    { name: "makerTraits", type: "uint256" },
+  ],
+} as const;
 
-// Expiration time mask (40 bits starting at position 210)
-const EXPIRATION_MASK = ((1n << 40n) - 1n) << 210n;
+// Maker traits bit layout:
+// [0..7]   - flags
+// [8..247] - nonceOrEpoch, expiration, series, allowPartialFill, etc.
+// [248..255] - reserved
 
-/* -------------------------------- Types -------------------------------- */
+// Bit positions in makerTraits
+const ALLOW_MULTIPLE_FILLS_FLAG = 0n;
+const EXPIRATION_OFFSET = 210n;
+const EXPIRATION_MASK = (1n << 40n) - 1n;
 
-export interface Order {
+export interface LimitOrder {
   salt: bigint;
-  maker: ViemAddress;
-  receiver: ViemAddress;
-  makerAsset: ViemAddress;
-  takerAsset: ViemAddress;
+  maker: Address;
+  receiver: Address;
+  makerAsset: Address;
+  takerAsset: Address;
   makingAmount: bigint;
   takingAmount: bigint;
   makerTraits: bigint;
 }
 
-export interface OrderWithExtension extends Order {
-  extension: Hex;
+export interface ERC1155AssetData {
+  token: Address;
+  tokenId: bigint;
+  amount: bigint;
+  data: string;
 }
 
-export type BuildOrderArgs1155 = {
-  makerAddress: ViemAddress;
-  maker1155: {
-    token: ViemAddress;
-    tokenId: bigint;
-    amount: bigint;
-    data?: Hex;
-  };
-  takerAsset: ViemAddress;
+/**
+ * Build a limit order for ERC-1155 tokens
+ * This creates an order that uses the ERC1155 proxy to handle the token transfer
+ */
+export function buildLimitOrder1155(params: {
+  makerAddress: Address;
+  maker1155: ERC1155AssetData;
+  takerAsset: Address;
   takerAmount: bigint;
   expirationSec?: number;
-  receiver?: ViemAddress;
   allowPartialFill?: boolean;
-};
-
-/* ----------------------------- Order Builder ----------------------------- */
-
-/**
- * Builds maker traits with expiration and other flags
- */
-function buildMakerTraits(
-  expirationSec: number,
-  allowPartialFill: boolean = true
-): bigint {
-  const now = Math.floor(Date.now() / 1000);
-  const expiration = BigInt(now + expirationSec);
-  
-  let traits = 0n;
-  
-  // Set expiration (40 bits at position 210)
-  traits |= (expiration & ((1n << 40n) - 1n)) << 210n;
-  
-  // Set flags
-  if (!allowPartialFill) {
-    traits |= NO_PARTIAL_FILLS_FLAG;
-  }
-  
-  return traits;
-}
-
-/**
- * Builds an ERC-1155 limit order for direct contract interaction
- */
-export function buildLimitOrder1155({
-  makerAddress,
-  maker1155: { token, tokenId, amount, data },
-  takerAsset,
-  takerAmount,
-  expirationSec = 2 * 60 * 60,
-  receiver,
-  allowPartialFill = true,
-}: BuildOrderArgs1155): {
-  order: OrderWithExtension;
-  typedData: any;
-  orderHash: Hex;
+  nonce?: bigint;
+}): {
+  order: LimitOrder;
+  typedData: {
+    domain: typeof DOMAIN;
+    types: typeof ORDER_TYPES;
+    primaryType: "Order";
+    message: LimitOrder;
+  };
+  orderHash: string;
 } {
-  // Generate salt
-  const salt = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+  const {
+    makerAddress,
+    maker1155,
+    takerAsset,
+    takerAmount,
+    expirationSec = 0,
+    allowPartialFill = false,
+    nonce = BigInt(Date.now()),
+  } = params;
+
+  // Build makerTraits
+  let makerTraits = 0n;
   
-  // Build maker traits
-  const makerTraits = buildMakerTraits(expirationSec, allowPartialFill);
-  
-  // Build extension data for ERC1155
+  // Set allow partial fill flag
+  if (allowPartialFill) {
+    makerTraits |= 1n << ALLOW_MULTIPLE_FILLS_FLAG;
+  }
+
+  // Set expiration (40 bits at position 210)
+  if (expirationSec > 0) {
+    const expiration = BigInt(Math.floor(Date.now() / 1000) + expirationSec);
+    makerTraits |= (expiration & EXPIRATION_MASK) << EXPIRATION_OFFSET;
+  }
+
+  // For ERC-1155, we use the proxy address as makerAsset
+  // The actual token address, tokenId, and amount are encoded in the extension
+  const order: LimitOrder = {
+    salt: nonce,
+    maker: makerAddress,
+    receiver: makerAddress, // receiver is typically same as maker
+    makerAsset: "0x03F916C97e7DF446aB916776313299C13b533f91" as Address, // ERC1155_PROXY_ADDRESS
+    takerAsset: takerAsset,
+    makingAmount: maker1155.amount,
+    takingAmount: takerAmount,
+    makerTraits,
+  };
+
+  // Build extension data for ERC-1155
+  // Extension format: tokenId (32 bytes) + token address (20 bytes) + data
   const extension = encodeAbiParameters(
     [
-      { name: "id", type: "uint256" },
+      { name: "tokenId", type: "uint256" },
       { name: "token", type: "address" },
       { name: "data", type: "bytes" },
     ],
-    [tokenId, token, (data ?? "0x") as Hex]
+    [maker1155.tokenId, maker1155.token, maker1155.data as `0x${string}`]
   );
-  
-  // Create order struct
-  const order: OrderWithExtension = {
-    salt,
-    maker: makerAddress,
-    receiver: receiver || "0x0000000000000000000000000000000000000000",
-    makerAsset: ERC1155_PROXY_ADDRESS,
-    takerAsset,
-    makingAmount: amount,
-    takingAmount: takerAmount,
-    makerTraits,
-    extension,
-  };
-  
-  // Create EIP-712 typed data
-  const typedData = {
-    domain: {
-      name: "1inch Limit Order Protocol",
-      version: "4",
-      chainId: CHAIN_ID,
-      verifyingContract: LOP_V4_ADDRESS as ViemAddress,
-    },
-    types: {
-      Order: [
-        { name: "salt", type: "uint256" },
-        { name: "maker", type: "address" },
-        { name: "receiver", type: "address" },
-        { name: "makerAsset", type: "address" },
-        { name: "takerAsset", type: "address" },
-        { name: "makingAmount", type: "uint256" },
-        { name: "takingAmount", type: "uint256" },
-        { name: "makerTraits", type: "uint256" },
-      ],
-    },
-    primaryType: "Order" as const,
-    message: {
-      salt: order.salt.toString(),
-      maker: order.maker,
-      receiver: order.receiver,
-      makerAsset: order.makerAsset,
-      takerAsset: order.takerAsset,
-      makingAmount: order.makingAmount.toString(),
-      takingAmount: order.takingAmount.toString(),
-      makerTraits: order.makerTraits.toString(),
-    },
-  };
-  
+
   // Calculate order hash
   const orderHash = getOrderHash(order);
-  
-  return { order, typedData, orderHash };
+
+  // Build typed data for signing
+  const typedData = {
+    domain: DOMAIN,
+    types: ORDER_TYPES,
+    primaryType: "Order" as const,
+    message: order,
+  };
+
+  return {
+    order: {
+      ...order,
+      extension, // Add extension to order object
+    } as any,
+    typedData,
+    orderHash,
+  };
 }
 
 /**
- * Calculates the order hash according to 1inch protocol
+ * Calculate the hash of an order
  */
-export function getOrderHash(order: Order): Hex {
+export function getOrderHash(order: LimitOrder): string {
   const encoded = encodeAbiParameters(
     [
       { name: "salt", type: "uint256" },
@@ -196,18 +171,41 @@ export function getOrderHash(order: Order): Hex {
       order.makerTraits,
     ]
   );
-  
+
   return keccak256(encoded);
 }
 
-/* ----------------------------- Contract ABIs ----------------------------- */
+/**
+ * Extract expiration timestamp from makerTraits
+ */
+export function getExpiration(makerTraits: bigint): bigint {
+  return (makerTraits >> EXPIRATION_OFFSET) & EXPIRATION_MASK;
+}
 
+/**
+ * Check if order allows partial fills
+ */
+export function allowsPartialFill(makerTraits: bigint): boolean {
+  return (makerTraits & (1n << ALLOW_MULTIPLE_FILLS_FLAG)) !== 0n;
+}
+
+/**
+ * Check if order is currently active (not expired)
+ */
+export function isOrderActive(makerTraits: bigint): boolean {
+  const expiration = getExpiration(makerTraits);
+  if (expiration === 0n) return true; // No expiration
+  
+  const now = BigInt(Math.floor(Date.now() / 1000));
+  return expiration > now;
+}
+
+// 1inch Limit Order Protocol v4 ABI (subset)
 export const lopV4Abi = [
-  // Standard fill order
+  // fillOrder - used to fill limit orders
   {
     type: "function",
     name: "fillOrder",
-    stateMutability: "payable",
     inputs: [
       {
         name: "order",
@@ -231,99 +229,26 @@ export const lopV4Abi = [
     outputs: [
       { name: "actualMakingAmount", type: "uint256" },
       { name: "actualTakingAmount", type: "uint256" },
-      { name: "orderHash", type: "bytes32" },
     ],
+    stateMutability: "nonpayable",
   },
-  // Fill order with extension (alternative)
-  {
-    type: "function",
-    name: "fillOrderExt",
-    stateMutability: "payable",
-    inputs: [
-      {
-        name: "order",
-        type: "tuple",
-        components: [
-          { name: "salt", type: "uint256" },
-          { name: "maker", type: "address" },
-          { name: "receiver", type: "address" },
-          { name: "makerAsset", type: "address" },
-          { name: "takerAsset", type: "address" },
-          { name: "makingAmount", type: "uint256" },
-          { name: "takingAmount", type: "uint256" },
-          { name: "makerTraits", type: "uint256" },
-        ],
-      },
-      { name: "signature", type: "bytes" },
-      { name: "extension", type: "bytes" },
-      { name: "makingAmount", type: "uint256" },
-      { name: "takingAmount", type: "uint256" },
-      { name: "skipPermitAndThreshold", type: "uint256" },
-    ],
-    outputs: [
-      { name: "actualMakingAmount", type: "uint256" },
-      { name: "actualTakingAmount", type: "uint256" },
-      { name: "orderHash", type: "bytes32" },
-    ],
-  },
-  // Cancel order
+  
+  // cancelOrder - cancel an order by its makerTraits and orderHash
   {
     type: "function",
     name: "cancelOrder",
-    stateMutability: "nonpayable",
     inputs: [
       { name: "makerTraits", type: "uint256" },
       { name: "orderHash", type: "bytes32" },
     ],
     outputs: [],
-  },
-  // Batch cancel
-  {
-    type: "function",
-    name: "batchCancelOrders",
     stateMutability: "nonpayable",
-    inputs: [
-      { name: "makerTraits", type: "uint256[]" },
-      { name: "orderHashes", type: "bytes32[]" },
-    ],
-    outputs: [],
   },
-  // Check if order is valid
-  {
-    type: "function",
-    name: "checkPredicate",
-    stateMutability: "view",
-    inputs: [
-      {
-        name: "order",
-        type: "tuple",
-        components: [
-          { name: "salt", type: "uint256" },
-          { name: "maker", type: "address" },
-          { name: "receiver", type: "address" },
-          { name: "makerAsset", type: "address" },
-          { name: "takerAsset", type: "address" },
-          { name: "makingAmount", type: "uint256" },
-          { name: "takingAmount", type: "uint256" },
-          { name: "makerTraits", type: "uint256" },
-        ],
-      },
-    ],
-    outputs: [{ name: "", type: "bool" }],
-  },
-  // Get remaining amount
-  {
-    type: "function",
-    name: "remaining",
-    stateMutability: "view",
-    inputs: [{ name: "orderHash", type: "bytes32" }],
-    outputs: [{ name: "", type: "uint256" }],
-  },
-  // Get remaining amount with order
+  
+  // remainingWithOrder - check remaining fillable amount
   {
     type: "function",
     name: "remainingWithOrder",
-    stateMutability: "view",
     inputs: [
       {
         name: "order",
@@ -342,74 +267,28 @@ export const lopV4Abi = [
       { name: "signature", type: "bytes" },
       { name: "extension", type: "bytes" },
     ],
-    outputs: [{ name: "", type: "uint256" }],
+    outputs: [{ name: "amount", type: "uint256" }],
+    stateMutability: "view",
   },
+  
   // Events
   {
     type: "event",
     name: "OrderFilled",
-    anonymous: false,
     inputs: [
       { indexed: true, name: "orderHash", type: "bytes32" },
       { indexed: false, name: "makingAmount", type: "uint256" },
       { indexed: false, name: "takingAmount", type: "uint256" },
     ],
+    anonymous: false,
   },
+  
   {
     type: "event",
     name: "OrderCancelled",
-    anonymous: false,
     inputs: [
       { indexed: true, name: "orderHash", type: "bytes32" },
     ],
+    anonymous: false,
   },
 ] as const;
-
-/* ------------------------- Helper Functions -------------------------- */
-
-/**
- * Encodes the order for contract interaction
- */
-export function encodeOrder(order: Order): Hex {
-  return encodeAbiParameters(
-    [
-      {
-        type: "tuple",
-        components: [
-          { name: "salt", type: "uint256" },
-          { name: "maker", type: "address" },
-          { name: "receiver", type: "address" },
-          { name: "makerAsset", type: "address" },
-          { name: "takerAsset", type: "address" },
-          { name: "makingAmount", type: "uint256" },
-          { name: "takingAmount", type: "uint256" },
-          { name: "makerTraits", type: "uint256" },
-        ],
-      },
-    ],
-    [order]
-  );
-}
-
-/**
- * Validates if an order is still active (not expired)
- */
-export function isOrderActive(makerTraits: bigint): boolean {
-  const expiration = (makerTraits & EXPIRATION_MASK) >> 210n;
-  const now = BigInt(Math.floor(Date.now() / 1000));
-  return expiration === 0n || expiration > now;
-}
-
-/**
- * Extracts expiration timestamp from maker traits
- */
-export function getExpiration(makerTraits: bigint): bigint {
-  return (makerTraits & EXPIRATION_MASK) >> 210n;
-}
-
-/**
- * Checks if order allows partial fills
- */
-export function allowsPartialFill(makerTraits: bigint): boolean {
-  return (makerTraits & NO_PARTIAL_FILLS_FLAG) === 0n;
-}

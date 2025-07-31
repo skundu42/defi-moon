@@ -16,6 +16,8 @@ export interface OrderData {
   signature: string;
   createdAt: number;
   status: "active" | "filled" | "cancelled" | "expired";
+  fillTx?: string;
+  filledTakingAmount?: string;
 }
 
 // Interface expected by Orderbook component
@@ -39,6 +41,8 @@ export interface ApiOrder {
   filled: boolean;
   cancelled: boolean;
   txHash?: string;
+  fillTx?: string;
+  filledTakingAmount?: string;
 }
 
 export interface OrderFilters {
@@ -51,11 +55,11 @@ export interface OrderFilters {
   offset?: number;
 }
 
-// Mock API base URL - replace with your actual API endpoint
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api/orders";
+// Use local API routes
+const API_BASE = "/api/orders";
 
 /**
- * Submit a new order to the orderbook API
+ * Submit a new order to the local orderbook API
  */
 export async function submitOrder(
   order: any,
@@ -89,43 +93,19 @@ export async function submitOrder(
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.message || `HTTP ${response.status}`);
+      throw new Error(error.error || `HTTP ${response.status}`);
     }
 
-    console.log("Order submitted successfully:", orderHash);
+    const result = await response.json();
+    console.log("Order submitted successfully:", result);
   } catch (error) {
     console.error("Failed to submit order:", error);
-    
-    // For development: store in localStorage as fallback
-    if (typeof window !== "undefined") {
-      const stored = JSON.parse(localStorage.getItem("orderbook") || "[]");
-      stored.push({
-        hash: orderHash,
-        order: {
-          salt: order.salt.toString(),
-          maker: order.maker,
-          receiver: order.receiver,
-          makerAsset: order.makerAsset,
-          takerAsset: order.takerAsset,
-          makingAmount: order.makingAmount.toString(),
-          takingAmount: order.takingAmount.toString(),
-          makerTraits: order.makerTraits.toString(),
-          extension: order.extension || "0x",
-        },
-        signature,
-        createdAt: Date.now(),
-        status: "active",
-      });
-      localStorage.setItem("orderbook", JSON.stringify(stored));
-      console.log("Order stored locally as fallback");
-    }
-    
     throw error;
   }
 }
 
 /**
- * Fetch orders with filters (for Orderbook component)
+ * Fetch orders with filters from local API
  */
 export async function fetchOrders(filters: OrderFilters = {}): Promise<{ orders: ApiOrder[] }> {
   try {
@@ -141,13 +121,12 @@ export async function fetchOrders(filters: OrderFilters = {}): Promise<{ orders:
     const response = await fetch(url);
     
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      throw new Error(`API Error: ${response.status}`);
     }
     
     const data = await response.json();
     
-    // Convert API response to ApiOrder format expected by Orderbook
-    // Your API returns orders in the 'orders' array
+    // Convert API response to ApiOrder format expected by components
     const orders: ApiOrder[] = data.orders.map((orderData: any) => ({
       orderHash: orderData.orderHash,
       order: {
@@ -160,61 +139,30 @@ export async function fetchOrders(filters: OrderFilters = {}): Promise<{ orders:
       },
       signature: orderData.signature,
       extension: orderData.extension || "0x",
-      makingAmount: orderData.order.makingAmount,
-      takingAmount: orderData.order.takingAmount,
-      maker: orderData.order.maker,
-      takerAsset: orderData.order.takerAsset,
-      createdAt: orderData.timestamp,
-      filled: orderData.filled,
-      cancelled: orderData.cancelled,
-      txHash: orderData.fillTx,
+      makingAmount: orderData.makingAmount || orderData.order?.makingAmount || "0",
+      takingAmount: orderData.takingAmount || orderData.order?.takingAmount || "0",
+      maker: orderData.maker || orderData.order?.maker || "",
+      takerAsset: orderData.takerAsset || orderData.order?.takerAsset || "",
+      createdAt: orderData.timestamp || orderData.createdAt || Date.now(),
+      filled: orderData.filled || false,
+      cancelled: orderData.cancelled || false,
+      txHash: orderData.fillTx || orderData.txHash,
+      fillTx: orderData.fillTx,
+      filledTakingAmount: orderData.filledTakingAmount,
     }));
 
+    console.log(`Fetched ${orders.length} orders from local API`);
     return { orders };
   } catch (error) {
-    console.error("Failed to fetch orders from API:", error);
+    console.error("Failed to fetch orders from local API:", error);
     
-    // Fallback to localStorage for development
-    if (typeof window !== "undefined") {
-      const stored = JSON.parse(localStorage.getItem("orderbook") || "[]");
-      const orders: ApiOrder[] = stored
-        .filter((orderData: OrderData) => {
-          if (filters.active && orderData.status !== "active") return false;
-          if (filters.maker && orderData.order.maker.toLowerCase() !== filters.maker.toLowerCase()) return false;
-          if (filters.takerAsset && orderData.order.takerAsset.toLowerCase() !== filters.takerAsset.toLowerCase()) return false;
-          if (filters.makerAsset && orderData.order.makerAsset.toLowerCase() !== filters.makerAsset.toLowerCase()) return false;
-          return true;
-        })
-        .map((orderData: OrderData) => ({
-          orderHash: orderData.hash,
-          order: {
-            salt: orderData.order.salt,
-            maker: orderData.order.maker,
-            receiver: orderData.order.receiver,
-            makerAsset: orderData.order.makerAsset,
-            takerAsset: orderData.order.takerAsset,
-            makerTraits: orderData.order.makerTraits,
-          },
-          signature: orderData.signature,
-          extension: orderData.order.extension,
-          makingAmount: orderData.order.makingAmount,
-          takingAmount: orderData.order.takingAmount,
-          maker: orderData.order.maker,
-          takerAsset: orderData.order.takerAsset,
-          createdAt: orderData.createdAt,
-          filled: orderData.status === "filled",
-          cancelled: orderData.status === "cancelled",
-        }));
-      
-      return { orders };
-    }
-    
+    // Return empty array if API fails
     return { orders: [] };
   }
 }
 
 /**
- * Mark an order as filled in the API (with txHash support for Orderbook component)
+ * Mark an order as filled in the local API
  */
 export async function markOrderFilled(orderHash: string, txHash: string): Promise<void> {
   try {
@@ -228,52 +176,19 @@ export async function markOrderFilled(orderHash: string, txHash: string): Promis
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.message || `HTTP ${response.status}`);
+      throw new Error(error.error || `HTTP ${response.status}`);
     }
 
-    console.log("Order marked as filled:", orderHash);
+    const result = await response.json();
+    console.log("Order marked as filled:", result);
   } catch (error) {
     console.error("Failed to mark order as filled:", error);
-    
-    // Fallback: update localStorage
-    if (typeof window !== "undefined") {
-      const stored = JSON.parse(localStorage.getItem("orderbook") || "[]");
-      const updated = stored.map((order: OrderData) =>
-        order.hash === orderHash ? { ...order, status: "filled" } : order
-      );
-      localStorage.setItem("orderbook", JSON.stringify(updated));
-    }
+    throw error;
   }
 }
 
 /**
- * Fetch all active orders from the API (legacy function for compatibility)
- */
-export async function fetchActiveOrders(): Promise<OrderData[]> {
-  const { orders } = await fetchOrders({ active: true });
-  
-  // Convert ApiOrder back to OrderData format
-  return orders.map((apiOrder): OrderData => ({
-    hash: apiOrder.orderHash,
-    order: {
-      salt: apiOrder.order.salt,
-      maker: apiOrder.order.maker,
-      receiver: apiOrder.order.receiver,
-      makerAsset: apiOrder.order.makerAsset,
-      takerAsset: apiOrder.order.takerAsset,
-      makingAmount: apiOrder.makingAmount,
-      takingAmount: apiOrder.takingAmount,
-      makerTraits: apiOrder.order.makerTraits,
-      extension: apiOrder.extension,
-    },
-    signature: apiOrder.signature,
-    createdAt: apiOrder.createdAt,
-    status: apiOrder.filled ? "filled" : apiOrder.cancelled ? "cancelled" : "active",
-  }));
-}
-
-/**
- * Cancel an order in the API
+ * Cancel an order in the local API
  */
 export async function cancelOrderInApi(orderHash: string): Promise<void> {
   try {
@@ -287,33 +202,42 @@ export async function cancelOrderInApi(orderHash: string): Promise<void> {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.message || `HTTP ${response.status}`);
+      throw new Error(error.error || `HTTP ${response.status}`);
     }
 
-    console.log("Order cancelled in API:", orderHash);
+    const result = await response.json();
+    console.log("Order cancelled in API:", result);
   } catch (error) {
     console.error("Failed to cancel order in API:", error);
-    
-    // Fallback: update localStorage
-    if (typeof window !== "undefined") {
-      const stored = JSON.parse(localStorage.getItem("orderbook") || "[]");
-      const updated = stored.map((order: OrderData) =>
-        order.hash === orderHash ? { ...order, status: "cancelled" } : order
-      );
-      localStorage.setItem("orderbook", JSON.stringify(updated));
-    }
-    
     throw error;
   }
 }
 
 /**
- * Get orders by maker address
+ * Clean up expired orders
  */
-export async function fetchOrdersByMaker(makerAddress: string): Promise<OrderData[]> {
-  const { orders } = await fetchOrders({ maker: makerAddress });
+export async function cleanupExpiredOrders(): Promise<void> {
+  try {
+    const response = await fetch(`${API_BASE}/cleanup`, { 
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+    
+    if (response.ok) {
+      const result = await response.json();
+      console.log("Cleanup result:", result);
+    }
+  } catch (error) {
+    console.error("Failed to cleanup expired orders:", error);
+  }
+}
+
+// Legacy compatibility functions
+export async function fetchActiveOrders(): Promise<OrderData[]> {
+  const { orders } = await fetchOrders({ active: true });
   
-  // Convert ApiOrder back to OrderData format
   return orders.map((apiOrder): OrderData => ({
     hash: apiOrder.orderHash,
     order: {
@@ -330,42 +254,64 @@ export async function fetchOrdersByMaker(makerAddress: string): Promise<OrderDat
     signature: apiOrder.signature,
     createdAt: apiOrder.createdAt,
     status: apiOrder.filled ? "filled" : apiOrder.cancelled ? "cancelled" : "active",
+    fillTx: apiOrder.fillTx,
+    filledTakingAmount: apiOrder.filledTakingAmount,
   }));
 }
 
-/**
- * Get order by hash
- */
-export async function fetchOrderByHash(orderHash: string): Promise<OrderData | null> {
-  try {
-    const response = await fetch(`${API_BASE}/order/${orderHash}`);
-    
-    if (!response.ok) {
-      if (response.status === 404) return null;
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    return await response.json();
-  } catch (error) {
-    console.error("Failed to fetch order:", error);
-    
-    // Fallback to localStorage
-    if (typeof window !== "undefined") {
-      const stored = JSON.parse(localStorage.getItem("orderbook") || "[]");
-      return stored.find((order: OrderData) => order.hash === orderHash) || null;
-    }
-    
-    return null;
-  }
+export async function fetchOrdersByMaker(makerAddress: string): Promise<OrderData[]> {
+  const { orders } = await fetchOrders({ maker: makerAddress });
+  
+  return orders.map((apiOrder): OrderData => ({
+    hash: apiOrder.orderHash,
+    order: {
+      salt: apiOrder.order.salt,
+      maker: apiOrder.order.maker,
+      receiver: apiOrder.order.receiver,
+      makerAsset: apiOrder.order.makerAsset,
+      takerAsset: apiOrder.order.takerAsset,
+      makingAmount: apiOrder.makingAmount,
+      takingAmount: apiOrder.takingAmount,
+      makerTraits: apiOrder.order.makerTraits,
+      extension: apiOrder.extension,
+    },
+    signature: apiOrder.signature,
+    createdAt: apiOrder.createdAt,
+    status: apiOrder.filled ? "filled" : apiOrder.cancelled ? "cancelled" : "active",
+    fillTx: apiOrder.fillTx,
+    filledTakingAmount: apiOrder.filledTakingAmount,
+  }));
 }
 
-/**
- * Clean up expired orders (utility function)
- */
-export async function cleanupExpiredOrders(): Promise<void> {
+export async function fetchOrderByHash(orderHash: string): Promise<OrderData | null> {
   try {
-    await fetch(`${API_BASE}/cleanup`, { method: "POST" });
+    // Try to fetch all orders and find the one with matching hash
+    const { orders } = await fetchOrders();
+    const order = orders.find(o => o.orderHash === orderHash);
+    
+    if (!order) return null;
+    
+    return {
+      hash: order.orderHash,
+      order: {
+        salt: order.order.salt,
+        maker: order.order.maker,
+        receiver: order.order.receiver,
+        makerAsset: order.order.makerAsset,
+        takerAsset: order.order.takerAsset,
+        makingAmount: order.makingAmount,
+        takingAmount: order.takingAmount,
+        makerTraits: order.order.makerTraits,
+        extension: order.extension,
+      },
+      signature: order.signature,
+      createdAt: order.createdAt,
+      status: order.filled ? "filled" : order.cancelled ? "cancelled" : "active",
+      fillTx: order.fillTx,
+      filledTakingAmount: order.filledTakingAmount,
+    };
   } catch (error) {
-    console.error("Failed to cleanup expired orders:", error);
+    console.error("Failed to fetch order by hash:", error);
+    return null;
   }
 }

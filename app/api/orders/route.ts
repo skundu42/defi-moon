@@ -3,13 +3,46 @@ import { NextRequest, NextResponse } from "next/server";
 import { keccak256, encodeAbiParameters } from "viem";
 
 // Shared in-memory storage (in production, use a proper database)
-let orders: Map<string, any>;
+declare global {
+  var ordersStorage: Map<string, any> | undefined;
+}
 
-if (global.ordersStorage) {
-  orders = global.ordersStorage;
-} else {
-  orders = new Map<string, any>();
-  global.ordersStorage = orders;
+// Initialize storage
+if (!global.ordersStorage) {
+  global.ordersStorage = new Map<string, any>();
+}
+
+// Helper function to calculate order hash
+function calculateOrderHash(order: any): string {
+  try {
+    const encoded = encodeAbiParameters(
+      [
+        { name: "salt", type: "uint256" },
+        { name: "maker", type: "address" },
+        { name: "receiver", type: "address" },
+        { name: "makerAsset", type: "address" },
+        { name: "takerAsset", type: "address" },
+        { name: "makingAmount", type: "uint256" },
+        { name: "takingAmount", type: "uint256" },
+        { name: "makerTraits", type: "uint256" },
+      ],
+      [
+        BigInt(order.salt),
+        order.maker,
+        order.receiver,
+        order.makerAsset,
+        order.takerAsset,
+        BigInt(order.makingAmount),
+        BigInt(order.takingAmount),
+        BigInt(order.makerTraits),
+      ]
+    );
+
+    return keccak256(encoded);
+  } catch (error) {
+    console.error("Error calculating order hash:", error);
+    throw error;
+  }
 }
 
 // GET /api/orders - Fetch orders with filters
@@ -23,6 +56,7 @@ export async function GET(request: NextRequest) {
   const offset = parseInt(searchParams.get("offset") || "0");
 
   try {
+    const orders = global.ordersStorage!;
     let filteredOrders = Array.from(orders.values());
 
     // Apply filters
@@ -63,7 +97,7 @@ export async function GET(request: NextRequest) {
     // Apply pagination
     const paginatedOrders = filteredOrders.slice(offset, offset + limit);
 
-    console.log(`Found ${filteredOrders.length} orders, returning ${paginatedOrders.length}`);
+    console.log(`API: Found ${filteredOrders.length} orders, returning ${paginatedOrders.length}`);
 
     return NextResponse.json({
       orders: paginatedOrders,
@@ -86,12 +120,12 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { order, signature, extension, orderHash } = body;
 
-    console.log("Received order submission:", { orderHash, order: order?.maker });
+    console.log("API: Received order submission:", { orderHash, maker: order?.maker });
 
     // Validate required fields
     if (!order || !signature || !orderHash) {
       return NextResponse.json(
-        { error: "Missing required fields" },
+        { error: "Missing required fields: order, signature, orderHash" },
         { status: 400 }
       );
     }
@@ -99,12 +133,14 @@ export async function POST(request: NextRequest) {
     // Verify order hash matches
     const calculatedHash = calculateOrderHash(order);
     if (calculatedHash !== orderHash) {
-      console.error("Order hash mismatch:", { calculated: calculatedHash, provided: orderHash });
+      console.error("API: Order hash mismatch:", { calculated: calculatedHash, provided: orderHash });
       return NextResponse.json(
         { error: "Order hash mismatch" },
         { status: 400 }
       );
     }
+
+    const orders = global.ordersStorage!;
 
     // Check if order already exists
     if (orders.has(orderHash)) {
@@ -117,25 +153,36 @@ export async function POST(request: NextRequest) {
     // Store order with the exact structure expected by the API
     const orderData = {
       orderHash,
-      order,
+      order: {
+        salt: order.salt,
+        maker: order.maker,
+        receiver: order.receiver,
+        makerAsset: order.makerAsset,
+        takerAsset: order.takerAsset,
+        makingAmount: order.makingAmount,
+        takingAmount: order.takingAmount,
+        makerTraits: order.makerTraits,
+      },
       signature,
       extension: extension || "0x",
       timestamp: Date.now(),
       cancelled: false,
       filled: false,
       fillTx: null,
+      filledTakingAmount: null,
       // Decode some useful fields for filtering
       maker: order.maker,
       makerAsset: order.makerAsset,
       takerAsset: order.takerAsset,
       makingAmount: order.makingAmount,
       takingAmount: order.takingAmount,
+      // Store makerTraits for expiration checks
       makerTraits: order.makerTraits,
     };
 
     orders.set(orderHash, orderData);
 
-    console.log(`Order stored successfully. Total orders: ${orders.size}`);
+    console.log(`API: Order stored successfully. Total orders: ${orders.size}`);
 
     return NextResponse.json({
       success: true,
@@ -149,42 +196,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-// Helper function to calculate order hash
-function calculateOrderHash(order: any): string {
-  try {
-    const encoded = encodeAbiParameters(
-      [
-        { name: "salt", type: "uint256" },
-        { name: "maker", type: "address" },
-        { name: "receiver", type: "address" },
-        { name: "makerAsset", type: "address" },
-        { name: "takerAsset", type: "address" },
-        { name: "makingAmount", type: "uint256" },
-        { name: "takingAmount", type: "uint256" },
-        { name: "makerTraits", type: "uint256" },
-      ],
-      [
-        BigInt(order.salt),
-        order.maker,
-        order.receiver,
-        order.makerAsset,
-        order.takerAsset,
-        BigInt(order.makingAmount),
-        BigInt(order.takingAmount),
-        BigInt(order.makerTraits),
-      ]
-    );
-
-    return keccak256(encoded);
-  } catch (error) {
-    console.error("Error calculating order hash:", error);
-    throw error;
-  }
-}
-
-// Ensure global type
-declare global {
-  var ordersStorage: Map<string, any> | undefined;
 }

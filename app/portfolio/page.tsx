@@ -1,126 +1,100 @@
-// app/portfolio/page.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useAccount, usePublicClient, useReadContract, useWatchContractEvent } from "wagmi";
+import {
+  useAccount,
+  usePublicClient,
+  useReadContract,
+  useWatchContractEvent,
+} from "wagmi";
 import { Card } from "@heroui/card";
 import { formatUnits, parseAbiItem } from "viem";
 import { Input } from "@heroui/input";
 
-import { useOrderbookOrders } from "@/hooks/useOrderbookOrders";
+import { useOrderbookOrders } from "../../hooks/useOrderbookOrders";
 import { ALL_TOKENS, getTokenBySymbol } from "@/lib/token";
-import { VAULT_ADDRESS, vaultAbi } from "@/lib/contracts";
+import {
+  VAULT_ADDRESS,
+  vaultAbi,
+} from "@/lib/contracts";
 
 /* ------------------------------ Constants ------------------------------ */
-
-// Reporting quote token: WXDAI (18)
 const WXDAI = ALL_TOKENS.find((t) => t.symbol === "WXDAI")!;
 const WXDAI_ADDR = WXDAI.address.toLowerCase();
 const ONE = 10n ** 18n;
 
-// Assume vault underlying is GNO (18). If you generalize, pull from series[id].underlyingDecimals per id.
 const UNDERLYING = getTokenBySymbol("GNO");
 
 /* ------------------------------ Event ABIs ------------------------------ */
-
-// event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry);
+// SeriesDefined
 const SERIES_DEFINED = parseAbiItem(
   "event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry)"
 );
-
-// event ReclaimCalculated(address indexed maker, uint256 indexed id, uint256 makerLockedBefore, uint256 exerciseShare, uint256 reclaimed, uint256 totalLockedBySeriesAfter);
+// Minted (when a maker mints options)
+const MINTED = parseAbiItem(
+  "event Minted(address indexed maker, uint256 indexed id, uint256 qty, uint256 collateralLocked)"
+);
+// ReclaimCalculated
 const RECLAIM_CALC = parseAbiItem(
   "event ReclaimCalculated(address indexed maker, uint256 indexed id, uint256 makerLockedBefore, uint256 exerciseShare, uint256 reclaimed, uint256 totalLockedBySeriesAfter)"
 );
 
 /* ------------------------------ Helpers ------------------------------ */
-
 function fmt(bi: bigint, decimals = 18, max = 6) {
   const n = Number(formatUnits(bi, decimals));
   return n.toLocaleString(undefined, { maximumFractionDigits: max });
 }
 
+// price quote: underlyingAmount * price (WXDAI per underlying)
 function wxQuote(underlyingAmount: bigint, priceWx18: bigint) {
-  // priceWx18 = WXDAI per 1 underlying (1e18)
   return (underlyingAmount * priceWx18) / ONE;
 }
 
-/* ------------------------------ Page ------------------------------ */
-
-type SeriesMeta = { id: bigint; expiry: bigint };
-type PendingRow = {
+/* ------------------------------ Types ------------------------------ */
+type SeriesMeta = {
   id: bigint;
-  settlePrice: bigint;          // WXDAI 1e18
-  pendingUnderlying: bigint;    // GNO 1e18
-  pendingWXDAI: bigint;         // WXDAI 1e18
+  expiry: bigint;
+  strike?: bigint;
+  underlying?: string;
 };
 
+type PendingRow = {
+  id: bigint;
+  settlePrice: bigint; // WXDAI 1e18
+  pendingUnderlying: bigint; // GNO 1e18
+  pendingWXDAI: bigint; // WXDAI 1e18
+};
+
+type MintedPosition = {
+  seriesId: bigint;
+  qty: bigint; // how many options minted (sold)
+  collateralLocked: bigint;
+  expiry: bigint;
+  strike: bigint;
+};
+
+type BoughtPosition = {
+  seriesId: bigint;
+  quantity: bigint; // options purchased
+  spentWXDAI: bigint; // cost in WXDAI (takerAsset is WXDAI)
+  expiry: bigint;
+  strike: bigint;
+};
+
+/* ------------------------------ Page ------------------------------ */
 export default function PortfolioPage() {
   const { address } = useAccount();
   const client = usePublicClient();
 
-  /* ---------------- Balances (My Vault) ---------------- */
-
-  const { data: collateral = 0n } = useReadContract({
-    address: VAULT_ADDRESS,
-    abi: vaultAbi,
-    functionName: "collateralBalance",
-    args: [((address ?? "0x0000000000000000000000000000000000000000") as `0x${string}`)],
-    query: { enabled: Boolean(address) },
-  });
-
-  const { data: totalLocked = 0n } = useReadContract({
-    address: VAULT_ADDRESS,
-    abi: vaultAbi,
-    functionName: "totalLocked",
-    args: [((address ?? "0x0000000000000000000000000000000000000000") as `0x${string}`)],
-    query: { enabled: Boolean(address) },
-  });
-
-  const { data: free = 0n } = useReadContract({
-    address: VAULT_ADDRESS,
-    abi: vaultAbi,
-    functionName: "freeCollateralOf",
-    args: [((address ?? "0x0000000000000000000000000000000000000000") as `0x${string}`)],
-    query: { enabled: Boolean(address) },
-  });
-
-  /* ---------------- Premiums (1inch) ---------------- */
-
-  const { orders, loading: ordersLoading, error: ordersError } = useOrderbookOrders(
-    address as `0x${string}`
-  );
-
-  // Sum filled premiums in WXDAI only (to avoid cross-asset conversion here)
-  const premiumsWX = useMemo(() => {
-    if (!orders || !address) return 0n;
-    let acc = 0n;
-    for (const o of orders) {
-      const tAsset = (o.takerAsset ?? "").toLowerCase();
-      // prefer filled amounts if present, else fall back to full order amounts
-      const tFilled = o.filledTakingAmount ?? o.takingAmount ?? "0";
-      if (tAsset === WXDAI_ADDR) {
-        try {
-          const amt = BigInt(tFilled);
-          acc += amt;
-        } catch {}
-      }
-    }
-    return acc;
-  }, [orders, address]);
-
-  /* ---------------- Series discovery (for pending exercise calc) ---------------- */
-
+  /* ---------------- On-chain series discovery ---------------- */
   const [series, setSeries] = useState<SeriesMeta[]>([]);
   const [fromBlockOverride, setFromBlockOverride] = useState<string>("");
   const [latestBlock, setLatestBlock] = useState<bigint>(0n);
   const bootRef = useRef(false);
-
   const ENV_DEPLOY_BLOCK = process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK
     ? BigInt(process.env.NEXT_PUBLIC_VAULT_DEPLOY_BLOCK!)
     : undefined;
 
-  // Backfill recent SeriesDefined to build an id list
   useEffect(() => {
     if (!client || bootRef.current) return;
     bootRef.current = true;
@@ -149,22 +123,22 @@ export default function PortfolioPage() {
           toBlock: latest,
         });
 
-        // Unique by id
         const map = new Map<string, SeriesMeta>();
         for (const l of logs) {
           const id = l.args.id as bigint;
           const expiry = l.args.expiry as bigint;
           map.set(id.toString(), { id, expiry });
         }
-        setSeries(Array.from(map.values()).sort((a, b) => Number(b.expiry - a.expiry)));
+        setSeries(
+          Array.from(map.values()).sort((a, b) => Number(b.expiry - a.expiry))
+        );
       } catch (e) {
         console.warn("Series scan failed:", e);
         setSeries([]);
       }
     })();
-  }, [client, fromBlockOverride]);
+  }, [client, fromBlockOverride, ENV_DEPLOY_BLOCK]);
 
-  // Live updates
   useWatchContractEvent({
     address: VAULT_ADDRESS,
     abi: vaultAbi,
@@ -183,8 +157,91 @@ export default function PortfolioPage() {
     },
   });
 
-  /* ---------------- Pending exercise (settled & you still have locks) ---------------- */
+  /* ---------------- On-chain balances for vault maker (you minted) ---------------- */
+  const { data: collateral = 0n } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: vaultAbi,
+    functionName: "collateralBalance",
+    args: [((address ?? "0x0000000000000000000000000000000000000000") as `0x${string}`)],
+    query: { enabled: Boolean(address) },
+  });
+  const { data: totalLocked = 0n } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: vaultAbi,
+    functionName: "totalLocked",
+    args: [((address ?? "0x0000000000000000000000000000000000000000") as `0x${string}`)],
+    query: { enabled: Boolean(address) },
+  });
+  const { data: free = 0n } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: vaultAbi,
+    functionName: "freeCollateralOf",
+    args: [((address ?? "0x0000000000000000000000000000000000000000") as `0x${string}`)],
+    query: { enabled: Boolean(address) },
+  });
 
+  /* ---------------- Local orderbook (premiums & bought options) ---------------- */
+  const { orders, loading: ordersLoading, error: ordersError } = useOrderbookOrders(
+    address as `0x${string}`
+  );
+
+  // Premiums received in WXDAI (filled orders where takerAsset is WXDAI)
+  const premiumsWX = useMemo(() => {
+    if (!orders || !address) return 0n;
+    let acc = 0n;
+    for (const o of orders) {
+      const tAsset = (o.takerAsset ?? "").toLowerCase();
+      if (o.filled) {
+        const tFilled = o.filledTakingAmount ?? o.takingAmount ?? "0";
+        if (tAsset === WXDAI_ADDR) {
+          try {
+            acc += BigInt(tFilled);
+          } catch {}
+        }
+      }
+    }
+    return acc;
+  }, [orders, address]);
+
+  // Bought options: aggregate fills where you were the taker (i.e., you purchased call options)
+  const boughtOptions = useMemo<BoughtPosition[]>(() => {
+    if (!orders || !address) return [];
+    const map = new Map<string, BoughtPosition>(); // seriesId -> aggregated
+    for (const o of orders) {
+      if (!o.filled) continue;
+      const extension = o.extension || "0x";
+      // extract seriesId from ERC-1155 extension
+      let seriesId = 0n;
+      if (extension.length >= 66) {
+        try {
+          seriesId = BigInt("0x" + extension.slice(2, 66));
+        } catch {}
+      }
+      const takerAsset = (o.takerAsset ?? "").toLowerCase();
+      if (takerAsset !== WXDAI_ADDR) continue; // only cost in WXDAI accounted here
+
+      const qty = BigInt(o.filledTakingAmount ? o.filledTakingAmount : "0"); // this is payment; for call options amount is makingAmount
+      const optionsBought = BigInt(o.makingAmount);
+      const key = seriesId.toString();
+      const existing = map.get(key);
+      if (existing) {
+        existing.quantity += optionsBought;
+        existing.spentWXDAI += qty;
+      } else {
+        // We need strike & expiry: placeholder until we enrich later
+        map.set(key, {
+          seriesId,
+          quantity: optionsBought,
+          spentWXDAI: qty,
+          expiry: 0n,
+          strike: 0n,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [orders]);
+
+  /* ---------------- Pending exercise (settled but not reclaimed) ---------------- */
   const [pendingRows, setPendingRows] = useState<PendingRow[]>([]);
   useEffect(() => {
     if (!client || !address || series.length === 0) {
@@ -195,18 +252,15 @@ export default function PortfolioPage() {
     (async () => {
       try {
         const out: PendingRow[] = [];
-
-        // We’ll loop (keeps types simple & reliable across providers)
         for (const s of series) {
-          // read settled + lockedPerSeries + settlePrice
-          const settled = (await client.readContract({
+          const seriesData = (await client.readContract({
             address: VAULT_ADDRESS,
             abi: vaultAbi,
             functionName: "series",
             args: [s.id],
           })) as any;
 
-          const isSettled = Boolean(settled?.[6]); // Series.settled
+          const isSettled = Boolean(seriesData?.[6]); // settled flag
           if (!isSettled) continue;
 
           const lockedForYou = (await client.readContract({
@@ -215,7 +269,6 @@ export default function PortfolioPage() {
             functionName: "lockedPerSeries",
             args: [address as `0x${string}`, s.id],
           })) as bigint;
-
           if (lockedForYou === 0n) continue;
 
           const shareUnderlying = (await client.readContract({
@@ -224,7 +277,6 @@ export default function PortfolioPage() {
             functionName: "exerciseShareOf",
             args: [address as `0x${string}`, s.id],
           })) as bigint;
-
           if (shareUnderlying === 0n) continue;
 
           const settlePx = (await client.readContract({
@@ -243,7 +295,6 @@ export default function PortfolioPage() {
             pendingWXDAI: shareWx,
           });
         }
-
         setPendingRows(out);
       } catch (e) {
         console.warn("Pending calc failed:", e);
@@ -257,8 +308,7 @@ export default function PortfolioPage() {
     [pendingRows]
   );
 
-  /* ---------------- Realized exercise (sum ReclaimCalculated for maker) ---------------- */
-
+  /* ---------------- Realized exercise (from reclaim events) ---------------- */
   const [realizedWX, setRealizedWX] = useState<bigint>(0n);
   const realizedBoot = useRef(false);
 
@@ -269,7 +319,7 @@ export default function PortfolioPage() {
     (async () => {
       try {
         const latest = await client.getBlockNumber();
-        const DEFAULT_SPAN = 400_000n; // a bit wider since reclaims may happen later than define
+        const DEFAULT_SPAN = 400_000n;
         const fromBlock =
           ENV_DEPLOY_BLOCK !== undefined
             ? ENV_DEPLOY_BLOCK
@@ -277,7 +327,6 @@ export default function PortfolioPage() {
             ? latest - DEFAULT_SPAN
             : 0n;
 
-        // Filter by maker (indexed).
         const logs = await client.getLogs({
           address: VAULT_ADDRESS,
           event: RECLAIM_CALC,
@@ -286,10 +335,9 @@ export default function PortfolioPage() {
           toBlock: latest,
         });
 
-        // Need settlePrice(id) for each unique id
-        const uniqIds = Array.from(new Set(logs.map((l) => (l.args?.id as bigint).toString()))).map(
-          (s) => BigInt(s)
-        );
+        const uniqIds = Array.from(
+          new Set(logs.map((l) => (l.args?.id as bigint).toString()))
+        ).map((s) => BigInt(s));
         const pxById = new Map<string, bigint>();
         for (const id of uniqIds) {
           const px = (await client.readContract({
@@ -304,7 +352,7 @@ export default function PortfolioPage() {
         let acc = 0n;
         for (const l of logs) {
           const id = l.args?.id as bigint;
-          const share = l.args?.exerciseShare as bigint; // in underlying
+          const share = l.args?.exerciseShare as bigint; // underlying
           if (share && share > 0n) {
             const px = pxById.get(id.toString()) ?? 0n;
             acc += wxQuote(share, px);
@@ -319,7 +367,6 @@ export default function PortfolioPage() {
     })();
   }, [client, address, ENV_DEPLOY_BLOCK]);
 
-  // Live add for realized when you reclaim again during session
   useWatchContractEvent({
     address: VAULT_ADDRESS,
     abi: vaultAbi,
@@ -327,10 +374,9 @@ export default function PortfolioPage() {
     args: { maker: (address ?? undefined) as any },
     onLogs: async (logs) => {
       if (!client || !address || logs.length === 0) return;
-      // Fetch settle prices for the ids in these logs
-      const ids = Array.from(new Set(logs.map((l) => (l.args?.id as bigint).toString()))).map(
-        (s) => BigInt(s)
-      );
+      const ids = Array.from(
+        new Set(logs.map((l) => (l.args?.id as bigint).toString()))
+      ).map((s) => BigInt(s));
 
       const pxById = new Map<string, bigint>();
       for (const id of ids) {
@@ -356,26 +402,111 @@ export default function PortfolioPage() {
     },
   });
 
-  /* ---------------- Net PnL (realized) ---------------- */
+  /* ---------------- Minted (sold) options via on-chain events ---------------- */
+  const [mintedPositions, setMintedPositions] = useState<MintedPosition[]>([]);
+  const mintedBoot = useRef(false);
+  useEffect(() => {
+    if (!client || !address || mintedBoot.current) return;
+    mintedBoot.current = true;
 
+    (async () => {
+      try {
+        const latest = await client.getBlockNumber();
+        const DEFAULT_SPAN = 400_000n;
+        const fromBlock =
+          ENV_DEPLOY_BLOCK !== undefined
+            ? ENV_DEPLOY_BLOCK
+            : latest > DEFAULT_SPAN
+            ? latest - DEFAULT_SPAN
+            : 0n;
+
+        const logs = await client.getLogs({
+          address: VAULT_ADDRESS,
+          event: MINTED,
+          args: { maker: address as `0x${string}` },
+          fromBlock,
+          toBlock: latest,
+        });
+
+        // build per-series aggregation
+        const map = new Map<string, MintedPosition>();
+        for (const l of logs) {
+          const id = l.args?.id as bigint;
+          const qty = l.args?.qty as bigint;
+          const collateralLocked = l.args?.collateralLocked as bigint;
+
+          // fetch series detail (strike & expiry) once per unique
+          if (!map.has(id.toString())) {
+            const seriesData = (await client.readContract({
+              address: VAULT_ADDRESS,
+              abi: vaultAbi,
+              functionName: "series",
+              args: [id],
+            })) as any;
+            const strike = seriesData?.[2] as bigint; // strike
+            const expiry = seriesData?.[3] as bigint; // expiry field positions may vary; adjust if needed
+            map.set(id.toString(), {
+              seriesId: id,
+              qty,
+              collateralLocked,
+              expiry: expiry ?? 0n,
+              strike: strike ?? 0n,
+            });
+          } else {
+            const existing = map.get(id.toString())!;
+            existing.qty += qty;
+            existing.collateralLocked += collateralLocked;
+          }
+        }
+
+        setMintedPositions(Array.from(map.values()));
+      } catch (e) {
+        console.warn("Minted scan failed:", e);
+        setMintedPositions([]);
+      }
+    })();
+  }, [client, address, ENV_DEPLOY_BLOCK]);
+
+  /* ---------------- Enrich bought options with strike/expiry from on-chain series ---------------- */
+  const enrichedBought = useMemo<BoughtPosition[]>(() => {
+    return boughtOptions.map((b) => {
+      const matching = series.find((s) => s.id.toString() === b.seriesId.toString());
+      // fetch strike/expiry on-the-fly if available (could cache for performance)
+      return {
+        ...b,
+        expiry: matching?.expiry ?? 0n,
+        strike: 0n, // if you have a way to read strike, you can add similar readContract here or preload series detail
+      };
+    });
+  }, [boughtOptions, series]);
+
+  /* ---------------- Net Realized PnL (maker) ---------------- */
   const netRealizedWX = useMemo(() => {
-    // Realized PnL = premiums (WXDAI only) - realized exercise (WXDAI)
-    const net = premiumsWX - realizedWX;
-    return net;
+    // Premiums received (WXDAI) minus realized exercise payoff (WXDAI)
+    return premiumsWX - realizedWX;
   }, [premiumsWX, realizedWX]);
 
-  /* ---------------- Render ---------------- */
+  /* ---------------- Total exposure summary ---------------- */
+  const totalMintedOptions = useMemo(
+    () => mintedPositions.reduce((acc, p) => acc + p.qty, 0n),
+    [mintedPositions]
+  );
+  const totalBoughtOptions = useMemo(
+    () => enrichedBought.reduce((acc, b) => acc + b.quantity, 0n),
+    [enrichedBought]
+  );
 
+  /* ---------------- Render ------------------------------ */
   return (
-    <section className="mx-auto max-w-5xl py-8 md:py-12 space-y-6">
+    <section className="mx-auto max-w-6xl py-8 space-y-6">
       <h1 className="text-2xl font-semibold">Portfolio</h1>
 
       {!address ? (
         <Card className="p-5">Connect your wallet to view your portfolio.</Card>
       ) : (
         <>
-          {/* Balances */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Summary metrics */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <Card className="p-4">
               <div className="text-sm text-default-500">Collateral balance</div>
               <div className="text-2xl font-semibold">
@@ -394,10 +525,6 @@ export default function PortfolioPage() {
                 {fmt(free as bigint, UNDERLYING.decimals)} {UNDERLYING.symbol}
               </div>
             </Card>
-          </div>
-
-          {/* PnL header metrics */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <Card className="p-4">
               <div className="text-sm text-default-500">Premiums received (WXDAI)</div>
               <div className="text-2xl font-semibold">
@@ -409,21 +536,29 @@ export default function PortfolioPage() {
               {ordersError && (
                 <div className="text-xs text-warning mt-1">Orderbook: {ordersError}</div>
               )}
-              <div className="text-xs text-default-500 mt-1">
-                (Counts fills where takerAsset is WXDAI.)
-              </div>
             </Card>
+          </div>
 
+          {/* PnL / exercise */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <Card className="p-4">
-              <div className="text-sm text-default-500">Realized exercise (sum, WXDAI)</div>
+              <div className="text-sm text-default-500">Realized exercise (WXDAI)</div>
               <div className="text-2xl font-semibold">{fmt(realizedWX, 18, 4)} {WXDAI.symbol}</div>
               <div className="text-xs text-default-500 mt-1">
-                From on-chain <code>ReclaimCalculated</code> events × settle price.
+                From on-chain reclaim events × settle price.
               </div>
             </Card>
-
             <Card className="p-4">
-              <div className="text-sm text-default-500">Net PnL (realized)</div>
+              <div className="text-sm text-default-500">Pending exercise (WXDAI)</div>
+              <div className="text-2xl font-semibold">
+                {fmt(pendingTotalWX, 18, 4)} {WXDAI.symbol}
+              </div>
+              <div className="text-xs text-default-500 mt-1">
+                Settled but not yet reclaimed.
+              </div>
+            </Card>
+            <Card className="p-4">
+              <div className="text-sm text-default-500">Net Realized PnL (WXDAI)</div>
               <div
                 className={`text-2xl font-semibold ${
                   netRealizedWX >= 0n ? "text-success" : "text-danger"
@@ -434,10 +569,109 @@ export default function PortfolioPage() {
             </Card>
           </div>
 
-          {/* Pending exercise (if any settled series where you still have locks) */}
+          {/* Positions: Minted (sold) options */}
+          <Card className="p-4">
+            <div className="flex justify-between items-center mb-2">
+              <div className="text-lg font-medium">Minted Call Options (as Maker)</div>
+              <div className="text-sm text-default-500">
+                Total minted: <span className="font-semibold">{fmt(totalMintedOptions, 0)}</span>
+              </div>
+            </div>
+            {mintedPositions.length === 0 ? (
+              <div className="text-sm text-default-500">No minted (sold) call options found.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="text-default-500">
+                      <th className="p-2 text-left">Series ID</th>
+                      <th className="p-2 text-left">Qty Minted</th>
+                      <th className="p-2 text-left">Strike</th>
+                      <th className="p-2 text-left">Expiry</th>
+                      <th className="p-2 text-left">Collateral Locked</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mintedPositions.map((p) => (
+                      <tr key={p.seriesId.toString()} className="border-t">
+                        <td className="p-2 font-mono">{p.seriesId.toString()}</td>
+                        <td className="p-2">{fmt(p.qty, 0)}</td>
+                        <td className="p-2">{fmt(p.strike, 18)}</td>
+                        <td className="p-2">
+                          {p.expiry > 0n
+                            ? new Date(Number(p.expiry) * 1000).toISOString().split("T")[0]
+                            : "-"}
+                        </td>
+                        <td className="p-2">
+                          {fmt(p.collateralLocked, UNDERLYING.decimals)} {UNDERLYING.symbol}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+
+          {/* Positions: Bought call options */}
+          <Card className="p-4">
+            <div className="flex justify-between items-center mb-2">
+              <div className="text-lg font-medium">Bought Call Options (as Taker)</div>
+              <div className="text-sm text-default-500">
+                Total bought: <span className="font-semibold">{fmt(totalBoughtOptions, 0)}</span>
+              </div>
+            </div>
+            {enrichedBought.length === 0 ? (
+              <div className="text-sm text-default-500">
+                No bought call options detected (fills).
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="text-default-500">
+                      <th className="p-2 text-left">Series ID</th>
+                      <th className="p-2 text-left">Qty Bought</th>
+                      <th className="p-2 text-left">Spent (WXDAI)</th>
+                      <th className="p-2 text-left">Avg Price per Option</th>
+                      <th className="p-2 text-left">Expiry</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {enrichedBought.map((b) => {
+                      const avgPrice = b.quantity === 0n ? 0n : (b.spentWXDAI * ONE) / b.quantity;
+                      return (
+                        <tr key={b.seriesId.toString()} className="border-t">
+                          <td className="p-2 font-mono">{b.seriesId.toString()}</td>
+                          <td className="p-2">{fmt(b.quantity, 0)}</td>
+                          <td className="p-2">
+                            {fmt(b.spentWXDAI, 18)} {WXDAI.symbol}
+                          </td>
+                          <td className="p-2">
+                            {avgPrice > 0n
+                              ? fmt(avgPrice, 18) + ` ${WXDAI.symbol}`
+                              : "-"}
+                          </td>
+                          <td className="p-2">
+                            {b.expiry > 0n
+                              ? new Date(Number(b.expiry) * 1000).toISOString().split("T")[0]
+                              : "-"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+
+          {/* Pending exercise breakdown */}
           <Card className="p-0 overflow-x-auto">
             <div className="flex items-center gap-3 p-3">
-              <div className="text-sm font-medium">Pending exercise (settled but not reclaimed)</div>
+              <div className="text-sm font-medium">
+                Pending Exercise (settled but not reclaimed)
+              </div>
               <div className="ml-auto text-xs text-default-500">
                 Vault: <span className="font-mono">{String(VAULT_ADDRESS)}</span> • Latest block:{" "}
                 <span className="font-mono">{latestBlock.toString()}</span>
@@ -464,14 +698,17 @@ export default function PortfolioPage() {
                     <tr key={r.id.toString()} className="border-t border-default-200/50">
                       <td className="p-3 font-mono">{r.id.toString()}</td>
                       <td className="p-3">{fmt(r.settlePrice, 18, 6)}</td>
-                      <td className="p-3">{fmt(r.pendingUnderlying, 18, 6)} {UNDERLYING.symbol}</td>
-                      <td className="p-3">{fmt(r.pendingWXDAI, 18, 6)} {WXDAI.symbol}</td>
+                      <td className="p-3">
+                        {fmt(r.pendingUnderlying, 18, 6)} {UNDERLYING.symbol}
+                      </td>
+                      <td className="p-3">
+                        {fmt(r.pendingWXDAI, 18, 6)} {WXDAI.symbol}
+                      </td>
                     </tr>
                   ))
                 )}
               </tbody>
             </table>
-
             {pendingRows.length > 0 && (
               <div className="p-3 text-sm">
                 <span className="text-default-500 mr-2">Total pending:</span>
@@ -482,7 +719,7 @@ export default function PortfolioPage() {
             )}
           </Card>
 
-          {/* Optional: from-block override for series scan */}
+          {/* Series scan override input */}
           <div className="flex items-center gap-2 text-sm">
             <span className="text-default-500">From block (series scan):</span>
             <Input

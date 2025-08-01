@@ -38,7 +38,7 @@ import {
 import { submitOrder, cancelOrderInApi } from "@/lib/orderApi";
 
 // --- Contract Addresses ---
-const ERC1155_TRANSFER_PROXY_ADDRESS = "0x639e4E6cFF7d9a9bcFCa09ac8282CF037D40f9Fd" as ViemAddress;
+const ERC1155_TRANSFER_PROXY_ADDRESS = "0x68Ccc1691AC63e0Ca99a3a4b4b61301d54CD2c0E" as ViemAddress;
 
 // --- Event ABI for SeriesDefined ---
 const SERIES_DEFINED = parseAbiItem(
@@ -89,6 +89,7 @@ type CreatedOrder = {
   amount: bigint;
   takerToken: string;
   takerAmount: bigint;
+  extension: string;
 };
 
 export default function CreateLimitOrder() {
@@ -177,6 +178,7 @@ export default function CreateLimitOrder() {
     [allSeries, now]
   );
 
+  // Check if proxy contract exists
   const [proxyExists, setProxyExists] = useState<boolean | null>(null);
   const [proxyCheckError, setProxyCheckError] = useState<string | null>(null);
 
@@ -256,7 +258,7 @@ export default function CreateLimitOrder() {
   });
 
   const onApproveProxy = useCallback(async () => {
-    if (!address) return;
+    if (!address || !writeContractAsync) return;
     try {
       addNotice("📝 Approving ERC1155TransferProxy...");
       const res = await writeContractAsync({
@@ -265,11 +267,9 @@ export default function CreateLimitOrder() {
         functionName: "setApprovalForAll",
         args: [ERC1155_TRANSFER_PROXY_ADDRESS as ViemAddress, true],
       });
-      if (res && typeof (res as any).wait === "function") {
-        await (res as any).wait();
-      } else {
-        await new Promise((r) => setTimeout(r, 2500));
-      }
+      
+      // Wait a bit for the transaction to be mined
+      await new Promise((resolve) => setTimeout(resolve, 3000));
       await refetchApproval();
       addNotice("✅ ERC1155TransferProxy approved successfully!");
     } catch (error: any) {
@@ -306,7 +306,22 @@ export default function CreateLimitOrder() {
     setSubmitting(true);
     try {
       addNotice("🔄 Creating and signing order...");
-      const { order, typedData, orderHash } = buildLimitOrder1155({
+      
+      console.log("🔍 Creating order with params:", {
+        makerAddress: address,
+        maker1155: {
+          token: CALLTOKEN_ADDRESS,
+          tokenId: selectedSeriesId,
+          amount: qty,
+          data: "0x",
+        },
+        takerAsset,
+        takerAmount: takerAmt,
+        expirationSec: 7 * 24 * 60 * 60, // 7 days
+        allowPartialFill: true,
+      });
+
+      const { order, typedData, orderHash, extension } = buildLimitOrder1155({
         makerAddress: address,
         maker1155: {
           token: CALLTOKEN_ADDRESS as ViemAddress,
@@ -316,9 +331,29 @@ export default function CreateLimitOrder() {
         },
         takerAsset,
         takerAmount: takerAmt,
-        expirationSec: 7 * 24 * 60 * 60,
+        expirationSec: 7 * 24 * 60 * 60, // 7 days
         allowPartialFill: true,
       });
+
+      console.log("🔍 Order created:", {
+        order,
+        orderHash,
+        extension,
+        calculatedHash: orderHash,
+        orderForHashing: {
+          salt: order.salt.toString(),
+          maker: order.maker,
+          receiver: order.receiver,
+          makerAsset: order.makerAsset,
+          takerAsset: order.takerAsset,
+          makingAmount: order.makingAmount.toString(),
+          takingAmount: order.takingAmount.toString(),
+          makerTraits: order.makerTraits.toString(),
+        },
+        typedDataDomain: typedData.domain,
+      });
+
+      addNotice("✍️ Please sign the order in your wallet...");
 
       const signature = await signTypedDataAsync({
         domain: typedData.domain,
@@ -327,7 +362,38 @@ export default function CreateLimitOrder() {
         message: typedData.message,
       });
 
-      await submitOrder(order, signature, orderHash);
+      console.log("🔍 Order signed:", { signature });
+
+      addNotice("📤 Submitting order to API...");
+
+      // Create the exact order structure that the API expects
+      const orderForApi = {
+        salt: order.salt.toString(),
+        maker: order.maker,
+        receiver: order.receiver,
+        makerAsset: order.makerAsset,
+        takerAsset: order.takerAsset,
+        makingAmount: order.makingAmount.toString(),
+        takingAmount: order.takingAmount.toString(),
+        makerTraits: order.makerTraits.toString(),
+        extension: extension, // Include extension in the order object
+      };
+
+      console.log("🔍 Submitting to API:", {
+        orderForApi,
+        signature,
+        orderHash,
+        extension,
+        submitData: {
+          order: orderForApi,
+          signature,
+          extension,
+          orderHash,
+        },
+      });
+
+      // Submit to API with proper structure
+      await submitOrder(orderForApi, signature, orderHash);
 
       const createdOrder: CreatedOrder = {
         hash: orderHash,
@@ -338,6 +404,7 @@ export default function CreateLimitOrder() {
         amount: qty,
         takerToken: takerSym,
         takerAmount: takerAmt,
+        extension,
       };
 
       setOrderHash(orderHash);
@@ -347,10 +414,11 @@ export default function CreateLimitOrder() {
       addNotice(`📋 Order hash: ${orderHash.slice(0, 16)}...`);
       addNotice(`📈 Selling ${qty.toString()} options for ${formatUnits(takerAmt, decimals)} ${takerSym}`);
 
+      // Reset form
       setQtyStr("");
       setTakerAmountStr("");
 
-      // notify orderbook to refresh
+      // Notify orderbook to refresh
       window.dispatchEvent(
         new CustomEvent("limit-order-created", {
           detail: { orderHash },
@@ -375,7 +443,7 @@ export default function CreateLimitOrder() {
   ]);
 
   const onCancelOrder = useCallback(async (createdOrder: CreatedOrder) => {
-    if (!address) return;
+    if (!address || !writeContractAsync) return;
     try {
       addNotice(`🔄 Cancelling order ${createdOrder.hash.slice(0, 10)}...`);
       await writeContractAsync({
@@ -424,11 +492,11 @@ export default function CreateLimitOrder() {
           ERC-1155 Options Limit Orders
         </h3>
         <p className="text-sm text-default-600">
-          Create limit orders to sell your option tokens using 1inch Protocol
+          Create limit orders to sell your option tokens using 1inch Protocol v4
         </p>
       </div>
 
-      {/* Proxy status */}
+      {/* Proxy Status */}
       <div className="text-center">
         {proxyExists === null ? (
           <div className="text-sm text-default-500 bg-default-100 p-3 rounded-lg">
@@ -471,7 +539,7 @@ export default function CreateLimitOrder() {
         </div>
       )}
 
-      {/* Series selector */}
+      {/* Series Selector */}
       <div className="space-y-2">
         <label className="flex items-center gap-2 text-sm font-medium">
           Option Series <Info tip="Select an option series to create a sell order" />
@@ -513,7 +581,7 @@ export default function CreateLimitOrder() {
         )}
       </div>
 
-      {/* Balance and series info */}
+      {/* Balance and Series Info */}
       {selectedSeries && (
         <div className="bg-default-50 p-4 rounded-lg space-y-2">
           <h4 className="font-medium text-sm">Selected Series Information</h4>
@@ -534,7 +602,7 @@ export default function CreateLimitOrder() {
         </div>
       )}
 
-      {/* Approval section */}
+      {/* Approval Section */}
       <div className="space-y-3">
         <h4 className="font-medium text-sm">Step 1: Approve Transfer Proxy</h4>
         <Button
@@ -551,7 +619,7 @@ export default function CreateLimitOrder() {
         </div>
       </div>
 
-      {/* Order creation form */}
+      {/* Order Creation Form */}
       <div className="space-y-4">
         <h4 className="font-medium text-sm">Step 2: Create Limit Order</h4>
         
@@ -711,9 +779,10 @@ export default function CreateLimitOrder() {
                       <div><span className="text-default-600">Making Amount:</span> {orderData.order.makingAmount.toString()}</div>
                       <div><span className="text-default-600">Taking Amount:</span> {orderData.order.takingAmount.toString()}</div>
                       <div><span className="text-default-600">Salt:</span> {orderData.order.salt.toString()}</div>
+                      <div><span className="text-default-600">Extension:</span> {orderData.extension}</div>
                     </div>
                     <div className="text-xs text-default-600 bg-default-50 p-2 rounded mt-2 font-sans">
-                      💡 This order is live on 1inch Protocol and can be filled by any taker. 
+                      💡 This order is live on 1inch Protocol v4 and can be filled by any taker. 
                       The ERC1155TransferProxy handles the conversion between ERC20-style transfers and ERC1155 token movements.
                     </div>
                   </div>
@@ -723,6 +792,40 @@ export default function CreateLimitOrder() {
           </div>
         </div>
       )}
+
+      {/* Debug Information */}
+      {process.env.NODE_ENV === 'development' && (
+        <details className="cursor-pointer">
+          <summary className="text-sm text-default-500 hover:text-default-700">
+            Debug Information (Development Only)
+          </summary>
+          <div className="mt-3 p-3 bg-default-100 rounded text-xs space-y-2">
+            <div><strong>Proxy Address:</strong> {ERC1155_TRANSFER_PROXY_ADDRESS}</div>
+            <div><strong>CallToken Address:</strong> {CALLTOKEN_ADDRESS}</div>
+            <div><strong>1inch LOP v4 Address:</strong> {LOP_V4_ADDRESS}</div>
+            <div><strong>Selected Series ID:</strong> {selectedSeriesId?.toString() || "None"}</div>
+            <div><strong>Option Balance:</strong> {optionBalance.toString()}</div>
+            <div><strong>Proxy Approved:</strong> {isApprovedForProxy ? "Yes" : "No"}</div>
+            <div><strong>Wallet Connected:</strong> {isConnected ? "Yes" : "No"}</div>
+            <div><strong>Active Series Count:</strong> {activeSeries.length}</div>
+          </div>
+        </details>
+      )}
+
+      {/* Help Section */}
+      <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+        <h5 className="font-medium text-blue-900 mb-2">
+          How ERC-1155 Limit Orders Work:
+        </h5>
+        <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
+          <li>Your ERC-1155 option tokens are listed for sale via the 1inch Protocol</li>
+          <li>The ERC1155TransferProxy enables ERC-20 style trading of ERC-1155 tokens</li>
+          <li>Orders are signed off-chain and stored in the local orderbook</li>
+          <li>Any wallet can discover and fill your orders by paying the specified price</li>
+          <li>Partial fills are supported - buyers can purchase any amount up to your total</li>
+          <li>Orders expire automatically after 7 days or can be cancelled manually</li>
+        </ul>
+      </div>
     </Card>
   );
 }

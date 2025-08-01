@@ -5,15 +5,16 @@ import { ERC1155_PROXY_ADDRESS, CALLTOKEN_ADDRESS } from "./contracts";
 // 1inch Limit Order Protocol v4 address on Gnosis Chain
 export const LOP_V4_ADDRESS = "0x111111125421ca6dc452d289314280a0f8842a65" as const;
 
-// TypedData domain for 1inch LOP v4
+// CRITICAL: The exact EIP-712 domain for 1inch LOP v4
+// Based on 1inch v4 documentation and contract analysis
 const DOMAIN = {
   name: "1inch Limit Order Protocol",
-  version: "4",
+  version: "4", // v4 uses version "4"
   chainId: 100, // Gnosis Chain
   verifyingContract: LOP_V4_ADDRESS as Address,
 } as const;
 
-// Order struct types for EIP-712
+// Order struct types for EIP-712 - EXACT structure from 1inch v4
 const ORDER_TYPES = {
   Order: [
     { name: "salt", type: "uint256" },
@@ -27,7 +28,7 @@ const ORDER_TYPES = {
   ],
 } as const;
 
-// Bit positions in makerTraits
+// Bit positions in makerTraits for 1inch v4
 const ALLOW_MULTIPLE_FILLS_FLAG = 0n;
 const EXPIRATION_OFFSET = 210n;
 const EXPIRATION_MASK = (1n << 40n) - 1n;
@@ -51,9 +52,7 @@ export interface ERC1155AssetData {
 }
 
 /**
- * Build a limit order for ERC-1155 tokens
- * This creates an order that uses the ERC1155TransferProxy to handle the token transfer
- * The proxy's transferFrom function matches ERC20's selector but includes ERC1155 data in the suffix
+ * Build a limit order for ERC-1155 tokens compatible with 1inch v4
  */
 export function buildLimitOrder1155(params: {
   makerAddress: Address;
@@ -84,6 +83,20 @@ export function buildLimitOrder1155(params: {
     nonce = BigInt(Date.now()),
   } = params;
 
+  // Build extension data for ERC-1155
+  const extension = encodeAbiParameters(
+    [
+      { name: "token", type: "address" },
+      { name: "tokenId", type: "uint256" },
+      { name: "data", type: "bytes" },
+    ],
+    [maker1155.token, maker1155.tokenId, maker1155.data as `0x${string}`]
+  );
+
+  // For 1inch v4, the salt should be the nonce without modification for basic orders
+  // Extension validation is handled separately by the protocol
+  let salt = nonce;
+
   // Build makerTraits
   let makerTraits = 0n;
   
@@ -98,34 +111,22 @@ export function buildLimitOrder1155(params: {
     makerTraits |= (expiration & EXPIRATION_MASK) << EXPIRATION_OFFSET;
   }
 
-  // Build extension data for ERC1155TransferProxy
-  // The proxy expects: abi.encode(tokenAddress, tokenId, data)
-  // This will be appended to the calldata after the standard transferFrom parameters
-  const extension = encodeAbiParameters(
-    [
-      { name: "token", type: "address" },
-      { name: "tokenId", type: "uint256" },
-      { name: "data", type: "bytes" },
-    ],
-    [maker1155.token, maker1155.tokenId, maker1155.data as `0x${string}`]
-  );
-
-  // For ERC-1155, we use the proxy address as makerAsset
+  // Create order with ERC1155 proxy as makerAsset
   const order: LimitOrder = {
-    salt: nonce,
+    salt,
     maker: makerAddress,
-    receiver: makerAddress,
-    makerAsset: ERC1155_PROXY_ADDRESS,
+    receiver: makerAddress, // Usually same as maker
+    makerAsset: ERC1155_PROXY_ADDRESS, // Use the proxy for ERC-1155
     takerAsset: takerAsset,
     makingAmount: maker1155.amount,
     takingAmount: takerAmount,
     makerTraits,
   };
 
-  // Calculate order hash
+  // Calculate order hash using the same method as 1inch
   const orderHash = getOrderHash(order);
 
-  // Build typed data for signing
+  // Build typed data for EIP-712 signing
   const typedData = {
     domain: DOMAIN,
     types: ORDER_TYPES,
@@ -136,42 +137,49 @@ export function buildLimitOrder1155(params: {
   return {
     order: {
       ...order,
-      extension, // Add extension to order object for convenience
+      extension,
     },
     typedData,
     orderHash,
-    extension, // Also return extension separately
+    extension,
   };
 }
 
 /**
- * Calculate the hash of an order
+ * Calculate the hash of an order using the exact same method as the API
+ * This must match the calculateOrderHash function in app/api/orders/route.ts
  */
 export function getOrderHash(order: LimitOrder): string {
-  const encoded = encodeAbiParameters(
-    [
-      { name: "salt", type: "uint256" },
-      { name: "maker", type: "address" },
-      { name: "receiver", type: "address" },
-      { name: "makerAsset", type: "address" },
-      { name: "takerAsset", type: "address" },
-      { name: "makingAmount", type: "uint256" },
-      { name: "takingAmount", type: "uint256" },
-      { name: "makerTraits", type: "uint256" },
-    ],
-    [
-      order.salt,
-      order.maker,
-      order.receiver,
-      order.makerAsset,
-      order.takerAsset,
-      order.makingAmount,
-      order.takingAmount,
-      order.makerTraits,
-    ]
-  );
+  try {
+    // Convert all values to the exact same format as the API expects
+    const encoded = encodeAbiParameters(
+      [
+        { name: "salt", type: "uint256" },
+        { name: "maker", type: "address" },
+        { name: "receiver", type: "address" },
+        { name: "makerAsset", type: "address" },
+        { name: "takerAsset", type: "address" },
+        { name: "makingAmount", type: "uint256" },
+        { name: "takingAmount", type: "uint256" },
+        { name: "makerTraits", type: "uint256" },
+      ],
+      [
+        BigInt(order.salt.toString()),
+        order.maker as `0x${string}`,
+        order.receiver as `0x${string}`,
+        order.makerAsset as `0x${string}`,
+        order.takerAsset as `0x${string}`,
+        BigInt(order.makingAmount.toString()),
+        BigInt(order.takingAmount.toString()),
+        BigInt(order.makerTraits.toString()),
+      ]
+    );
 
-  return keccak256(encoded);
+    return keccak256(encoded);
+  } catch (error) {
+    console.error("Error calculating order hash:", error);
+    throw error;
+  }
 }
 
 /**
@@ -201,7 +209,7 @@ export function isOrderActive(makerTraits: bigint): boolean {
 
 // 1inch Limit Order Protocol v4 ABI (subset)
 export const lopV4Abi = [
-  // fillOrder - used to fill limit orders
+  // fillOrder - used to fill limit orders without extensions
   {
     type: "function",
     name: "fillOrder",
@@ -232,15 +240,35 @@ export const lopV4Abi = [
     stateMutability: "nonpayable",
   },
   
-  // cancelOrder - cancel an order by its makerTraits and orderHash
+  // fillOrderArgs - used to fill limit orders with parsed extension arguments
   {
     type: "function",
-    name: "cancelOrder",
+    name: "fillOrderArgs",
     inputs: [
-      { name: "makerTraits", type: "uint256" },
-      { name: "orderHash", type: "bytes32" },
+      {
+        name: "order",
+        type: "tuple",
+        components: [
+          { name: "salt", type: "uint256" },
+          { name: "maker", type: "address" },
+          { name: "receiver", type: "address" },
+          { name: "makerAsset", type: "address" },
+          { name: "takerAsset", type: "address" },
+          { name: "makingAmount", type: "uint256" },
+          { name: "takingAmount", type: "uint256" },
+          { name: "makerTraits", type: "uint256" },
+        ],
+      },
+      { name: "signature", type: "bytes" },
+      { name: "makingAmount", type: "uint256" },
+      { name: "takingAmount", type: "uint256" },
+      { name: "extension", type: "bytes" },
+      { name: "args", type: "bytes" },
     ],
-    outputs: [],
+    outputs: [
+      { name: "actualMakingAmount", type: "uint256" },
+      { name: "actualTakingAmount", type: "uint256" },
+    ],
     stateMutability: "nonpayable",
   },
   
@@ -268,6 +296,18 @@ export const lopV4Abi = [
     ],
     outputs: [{ name: "amount", type: "uint256" }],
     stateMutability: "view",
+  },
+  
+  // cancelOrder - cancel an order by its makerTraits and orderHash
+  {
+    type: "function",
+    name: "cancelOrder",
+    inputs: [
+      { name: "makerTraits", type: "uint256" },
+      { name: "orderHash", type: "bytes32" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
   },
   
   // Events

@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { useAccount, usePublicClient } from "wagmi";
-import { Address as ViemAddress } from "viem";
+import { useAccount, usePublicClient, useReadContract, useWriteContract } from "wagmi";
+import { Address as ViemAddress, formatUnits } from "viem";
 import { Button } from "@heroui/button";
 import { Card } from "@heroui/card";
 import { Select, SelectItem } from "@heroui/select";
@@ -13,10 +13,10 @@ import { Tooltip } from "@heroui/tooltip";
 
 import {
   LOP_V4_ADDRESS,
-  lopV4Abi,
   getExpiration,
   allowsPartialFill,
   isOrderActive,
+  lopV4Abi,
 } from "@/lib/oneInch";
 import {
   TOKEN_ADDRESSES,
@@ -77,7 +77,7 @@ type OrderRowProps = {
 function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: OrderRowProps) {
   const { address, isConnected } = useAccount();
   const publicClient = usePublicClient();
-  const { writeContractAsync, isPending } = usePublicClient ? usePublicClient() as any : { writeContractAsync: undefined, isPending: false }; // fallback to satisfy typings
+  const { writeContractAsync, isPending } = useWriteContract();
 
   const { seriesId, hasExtension } = useMemo(
     () => parseERC1155Extension(order.extension),
@@ -163,7 +163,7 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
   }, [fillPercent]);
 
   const handleApproval = useCallback(async () => {
-    if (!address) return;
+    if (!address || !writeContractAsync) return;
     try {
       addNotice(`⏳ Approving ${orderInfo.takerToken}...`);
       await writeContractAsync({
@@ -179,7 +179,7 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
   }, [address, order.takerAsset, orderInfo.takerToken, writeContractAsync, addNotice]);
 
   const fillOrder = useCallback(async (percent: number) => {
-    if (!address || !publicClient) return;
+    if (!address || !publicClient || !writeContractAsync) return;
     if (!orderInfo.isActive) {
       addNotice("❌ Order is not active");
       return;
@@ -199,12 +199,81 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
         makerTraits: BigInt(order.order.makerTraits),
       };
 
-      const remaining = await publicClient.readContract({
-        address: LOP_V4_ADDRESS,
-        abi: lopV4Abi,
-        functionName: "remainingWithOrder",
-        args: [orderStruct, order.signature as `0x${string}`, order.extension as `0x${string}`],
+      // Parse extension data for ERC-1155
+      let extensionArgs = "0x";
+      if (order.extension && order.extension !== "0x") {
+        try {
+          // The extension contains: abi.encode(token, tokenId, data)
+          // For fillOrderArgs, we need to provide these as separate arguments
+          // The args parameter should contain the parsed extension data
+          extensionArgs = order.extension;
+        } catch (error) {
+          console.error("Failed to parse extension:", error);
+          addNotice("❌ Invalid extension data");
+          return;
+        }
+      }
+
+      // Debug: Log order data for signature verification
+      console.log("🔍 Order debug info:", {
+        orderHash: order.orderHash,
+        orderStruct,
+        signature: order.signature,
+        extension: order.extension,
+        extensionArgs,
+        originalOrder: order.order,
+        makerAssetIsProxy: orderStruct.makerAsset.toLowerCase() === ERC1155_PROXY_ADDRESS.toLowerCase(),
       });
+
+      // Validate that the order is properly set up for ERC-1155
+      if (orderStruct.makerAsset.toLowerCase() !== ERC1155_PROXY_ADDRESS.toLowerCase()) {
+        addNotice("❌ Order is not configured for ERC-1155 trading");
+        return;
+      }
+
+      // Validate extension data format
+      if (!order.extension || order.extension === "0x" || order.extension.length < 130) {
+        addNotice("❌ Invalid or missing ERC-1155 extension data");
+        return;
+      }
+
+      // Check if order is still valid before trying to fill
+      let remaining: bigint;
+      try {
+        remaining = await publicClient.readContract({
+          address: LOP_V4_ADDRESS,
+          abi: lopV4Abi,
+          functionName: "remainingWithOrder",
+          args: [orderStruct, order.signature as `0x${string}`, order.extension as `0x${string}`],
+        });
+      } catch (remainingError: any) {
+        console.error("remainingWithOrder failed:", remainingError);
+        console.log("🔍 Detailed error info:", {
+          error: remainingError,
+          orderStruct,
+          signature: order.signature,
+          extension: order.extension,
+        });
+        
+        // Common reasons for remainingWithOrder to fail
+        if (remainingError?.message?.includes("expired")) {
+          addNotice("❌ Order has expired");
+          return;
+        }
+        if (remainingError?.message?.includes("signature") || remainingError?.message?.includes("ECDSA")) {
+          addNotice("❌ Invalid order signature - order may have been created incorrectly");
+          console.log("🔍 Signature verification failed. Check order creation process.");
+          return;
+        }
+        if (remainingError?.message?.includes("cancelled")) {
+          addNotice("❌ Order has been cancelled");
+          return;
+        }
+        
+        // For other errors, provide more info
+        addNotice(`❌ Order validation failed: ${remainingError?.shortMessage || "Unknown error"}`);
+        return;
+      }
 
       if (remaining === 0n) {
         addNotice("❌ No remaining amount for this order");
@@ -223,29 +292,37 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
           ? (maxTakingAmount * BigInt(percent)) / 100n
           : maxTakingAmount;
 
+      // Handle approval if needed
       if (needsApproval) {
         addNotice(`⏳ Approving ${orderInfo.takerToken}...`);
-        await writeContractAsync({
-          address: order.takerAsset as ViemAddress,
-          abi: erc20Abi,
-          functionName: "approve",
-          args: [LOP_V4_ADDRESS as ViemAddress, takingAmount * 2n],
-        });
-        addNotice(`✅ ${orderInfo.takerToken} approved`);
+        try {
+          await writeContractAsync({
+            address: order.takerAsset as ViemAddress,
+            abi: erc20Abi,
+            functionName: "approve",
+            args: [LOP_V4_ADDRESS as ViemAddress, takingAmount * 2n],
+          });
+          addNotice(`✅ ${orderInfo.takerToken} approved`);
+        } catch (approvalError: any) {
+          addNotice(`❌ Approval failed: ${approvalError?.shortMessage || "Unknown error"}`);
+          return;
+        }
       }
 
       addNotice(`📋 Filling ERC-1155 order for Series ${seriesId.toString()}`);
 
+      // Use fillOrderArgs for ERC-1155 orders with extensions
       const txHash = await writeContractAsync({
         address: LOP_V4_ADDRESS,
         abi: lopV4Abi,
-        functionName: "fillOrder",
+        functionName: "fillOrderArgs",
         args: [
           orderStruct,
           order.signature as `0x${string}`,
           makingAmount,
           takingAmount,
           order.extension as `0x${string}`,
+          extensionArgs as `0x${string}`, // Additional args for extension handling
         ],
       });
 
@@ -254,7 +331,28 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
       onFilled();
     } catch (error: any) {
       console.error("Fill error:", error);
-      addNotice(`❌ Fill failed: ${error?.shortMessage || error?.message || "Unknown error"}`);
+      
+      // Provide more specific error messages
+      let errorMessage = "Unknown error";
+      if (error?.shortMessage) {
+        errorMessage = error.shortMessage;
+      } else if (error?.message) {
+        if (error.message.includes("insufficient")) {
+          errorMessage = "Insufficient balance or allowance";
+        } else if (error.message.includes("expired")) {
+          errorMessage = "Order has expired";
+        } else if (error.message.includes("signature") || error.message.includes("ECDSA")) {
+          errorMessage = "Invalid signature - order creation issue";
+        } else if (error.message.includes("cancelled")) {
+          errorMessage = "Order has been cancelled";
+        } else if (error.message.includes("filled")) {
+          errorMessage = "Order already filled";
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      addNotice(`❌ Fill failed: ${errorMessage}`);
     }
   }, [
     address,
@@ -271,7 +369,115 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
 
   return (
     <div className="p-4 border rounded-lg space-y-3 bg-gradient-to-r from-gray-50 to-gray-100 dark:from-gray-800 dark:to-gray-900 border-gray-200 dark:border-gray-700">
-      {/* ... same rendering as before ... */}
+      {/* Order Header */}
+      <div className="flex items-start justify-between">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-sm font-semibold">
+              Order {order.orderHash.slice(0, 8)}...
+            </span>
+            <Chip size="sm" color={orderInfo.isActive ? "success" : "warning"} variant="flat">
+              {orderInfo.isActive ? "Active" : "Inactive"}
+            </Chip>
+            {orderInfo.allowsPartial && (
+              <Chip size="sm" color="primary" variant="flat">
+                Partial Fill
+              </Chip>
+            )}
+          </div>
+          <div className="text-xs text-default-500">
+            Series: {orderInfo.shortSeriesId} • Maker: {order.order.maker.slice(0, 6)}...{order.order.maker.slice(-4)}
+          </div>
+        </div>
+        
+        <div className="text-right">
+          <div className="text-sm font-medium">
+            {orderInfo.optionsAmountDisplay} options
+          </div>
+          <div className="text-xs text-default-500">
+            for {orderInfo.totalPrice} {orderInfo.takerToken}
+          </div>
+        </div>
+      </div>
+
+      {/* Order Details */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+        <div>
+          <div className="text-default-500">Price per Option</div>
+          <div className="font-medium">{orderInfo.pricePerOption} {orderInfo.takerToken}</div>
+        </div>
+        <div>
+          <div className="text-default-500">Total Amount</div>
+          <div className="font-medium">{orderInfo.optionsAmountDisplay} options</div>
+        </div>
+        <div>
+          <div className="text-default-500">Total Cost</div>
+          <div className="font-medium">{orderInfo.totalPrice} {orderInfo.takerToken}</div>
+        </div>
+        <div>
+          <div className="text-default-500">Expires</div>
+          <div className="font-medium">
+            {orderInfo.expiry.getTime() > 0 
+              ? orderInfo.expiry.toLocaleDateString()
+              : "Never"
+            }
+          </div>
+        </div>
+      </div>
+
+      {/* Fill Controls */}
+      {isConnected && orderInfo.isActive && (
+        <div className="flex items-end gap-3 pt-3 border-t border-default-200">
+          <div className="flex-1">
+            <label className="text-xs text-default-500 mb-1 block">
+              Fill Percentage
+            </label>
+            <Input
+              size="sm"
+              type="number"
+              min="1"
+              max="100"
+              value={fillPercent}
+              onChange={(e) => onChangeFill(order.orderHash, e.target.value)}
+              placeholder="100"
+              endContent={<span className="text-xs text-default-500">%</span>}
+              classNames={{
+                inputWrapper: "h-8 min-h-8",
+                input: "text-xs"
+              }}
+            />
+          </div>
+
+          {needsApproval && (
+            <Button
+              size="sm"
+              color="warning"
+              variant="flat"
+              onPress={handleApproval}
+              isLoading={isPending}
+            >
+              Approve {orderInfo.takerToken}
+            </Button>
+          )}
+
+          <Button
+            size="sm"
+            color="primary"
+            onPress={() => fillOrder(parsedFillPercent)}
+            isDisabled={needsApproval || isPending}
+            isLoading={isPending}
+          >
+            Fill Order
+          </Button>
+        </div>
+      )}
+
+      {/* Connection prompt */}
+      {!isConnected && (
+        <div className="text-xs text-default-500 text-center py-2 border-t border-default-200">
+          Connect your wallet to fill this order
+        </div>
+      )}
     </div>
   );
 }
@@ -284,9 +490,6 @@ export default function Orderbook() {
   const [filters, setFilters] = useState<OrderFilters>({ active: true });
   const [selectedToken, setSelectedToken] = useState<string>("all");
   const [fillPercents, setFillPercents] = useState<Record<string, string>>({});
-  const [debugMode, setDebugMode] = useState(false);
-  const [rawOrders, setRawOrders] = useState<any[]>([]);
-
   const addNotice = useCallback((msg: string) => {
     const id = Date.now().toString();
     setNotices((n) => [...n, `${id}:${msg}`]);
@@ -299,7 +502,8 @@ export default function Orderbook() {
     setLoading(true);
     try {
       const { orders: allOrders } = await fetchOrders({ active: false });
-      setRawOrders(allOrders);
+
+      console.log("🔍 All orders from API:", allOrders.length, allOrders);
 
       const params: OrderFilters = {
         ...filters,
@@ -312,13 +516,28 @@ export default function Orderbook() {
 
       const { orders: fetched } = await fetchOrders(params);
 
+      console.log("🔍 Fetched orders after filter:", fetched.length, fetched);
+
       const filtered = fetched.filter((o) => {
         const { hasExtension } = parseERC1155Extension(o.extension);
         const makerAssetRaw = o.order?.makerAsset || o.makerAsset || "";
         const isProxyOrder =
           makerAssetRaw.toLowerCase() === ERC1155_PROXY_ADDRESS.toLowerCase();
+        
+        console.log("🔍 Order filtering debug:", {
+          orderHash: o.orderHash,
+          extension: o.extension,
+          hasExtension,
+          makerAssetRaw,
+          ERC1155_PROXY_ADDRESS,
+          isProxyOrder,
+          passesFilter: hasExtension && isProxyOrder,
+        });
+        
         return hasExtension && isProxyOrder;
       });
+
+      console.log("🔍 Final filtered orders:", filtered.length, filtered);
 
       setOrders(filtered);
 
@@ -370,8 +589,6 @@ export default function Orderbook() {
     [notices]
   );
 
-
-
   return (
     <Card className="p-6 space-y-6 max-w-6xl mx-auto">
       <div className="flex justify-between items-center">
@@ -387,47 +604,8 @@ export default function Orderbook() {
           <Button size="sm" onPress={loadOrders} isLoading={loading}>
             {loading ? "Loading..." : "Refresh"}
           </Button>
-          <Button size="sm" variant="flat" onPress={() => setDebugMode(!debugMode)}>
-            {debugMode ? "Hide Debug" : "Show Debug"}
-          </Button>
         </div>
       </div>
-
-      {/* Debug Panel */}
-      {debugMode && (
-        <div className="p-4 bg-gray-100 dark:bg-gray-800 rounded-lg space-y-2">
-          <h4 className="font-semibold text-sm">Debug Information</h4>
-          <div className="text-xs font-mono space-y-1">
-            <div>ERC1155_PROXY_ADDRESS: {ERC1155_PROXY_ADDRESS}</div>
-            <div>Total orders in API: {rawOrders.length}</div>
-            <div>Orders after filter: {orders.length}</div>
-            <div>Active filter: {filters.active ? "Yes" : "No"}</div>
-            <div>Selected token: {selectedToken}</div>
-          </div>
-          {rawOrders.length > 0 && (
-            <details className="cursor-pointer">
-              <summary className="text-xs font-medium">View all orders in API</summary>
-              <div className="mt-2 max-h-64 overflow-y-auto">
-                {rawOrders.map((order, idx) => (
-                  <div
-                    key={idx}
-                    className="p-2 bg-white dark:bg-gray-700 rounded mt-1 text-xs"
-                  >
-                    <div>Hash: {order.orderHash}</div>
-                    <div>
-                      Maker Asset: {order.order?.makerAsset || order.makerAsset}
-                    </div>
-                    <div>Extension: {order.extension}</div>
-                    <div>
-                      Has Extension: {parseERC1155Extension(order.extension).hasExtension ? "Yes" : "No"}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </details>
-          )}
-        </div>
-      )}
 
       {/* Notices */}
       {displayNotices.length > 0 && (
@@ -503,11 +681,6 @@ export default function Orderbook() {
               ? "Be the first to create an order or check back later"
               : `No orders found for ${selectedToken}. Try selecting "All Payment Tokens"`}
           </div>
-          {rawOrders.length > 0 && (
-            <div className="mt-4 text-xs text-amber-600 dark:text-amber-400">
-              Note: {rawOrders.length} orders exist in the API but don't match the ERC-1155 proxy filter
-            </div>
-          )}
           <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-left">
             <h5 className="font-medium text-blue-900 dark:text-blue-100 mb-2">
               How the Orderbook Works:

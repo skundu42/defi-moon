@@ -1,5 +1,6 @@
 // lib/oneInch.ts
 import { Address, encodeAbiParameters, keccak256 } from "viem";
+import { ERC1155_PROXY_ADDRESS, CALLTOKEN_ADDRESS } from "./contracts";
 
 // 1inch Limit Order Protocol v4 address on Gnosis Chain
 export const LOP_V4_ADDRESS = "0x111111125421ca6dc452d289314280a0f8842a65" as const;
@@ -26,11 +27,6 @@ const ORDER_TYPES = {
   ],
 } as const;
 
-// Maker traits bit layout:
-// [0..7]   - flags
-// [8..247] - nonceOrEpoch, expiration, series, allowPartialFill, etc.
-// [248..255] - reserved
-
 // Bit positions in makerTraits
 const ALLOW_MULTIPLE_FILLS_FLAG = 0n;
 const EXPIRATION_OFFSET = 210n;
@@ -56,7 +52,8 @@ export interface ERC1155AssetData {
 
 /**
  * Build a limit order for ERC-1155 tokens
- * This creates an order that uses the ERC1155 proxy to handle the token transfer
+ * This creates an order that uses the ERC1155TransferProxy to handle the token transfer
+ * The proxy's transferFrom function matches ERC20's selector but includes ERC1155 data in the suffix
  */
 export function buildLimitOrder1155(params: {
   makerAddress: Address;
@@ -67,7 +64,7 @@ export function buildLimitOrder1155(params: {
   allowPartialFill?: boolean;
   nonce?: bigint;
 }): {
-  order: LimitOrder;
+  order: LimitOrder & { extension?: string };
   typedData: {
     domain: typeof DOMAIN;
     types: typeof ORDER_TYPES;
@@ -75,6 +72,7 @@ export function buildLimitOrder1155(params: {
     message: LimitOrder;
   };
   orderHash: string;
+  extension: string;
 } {
   const {
     makerAddress,
@@ -100,29 +98,29 @@ export function buildLimitOrder1155(params: {
     makerTraits |= (expiration & EXPIRATION_MASK) << EXPIRATION_OFFSET;
   }
 
+  // Build extension data for ERC1155TransferProxy
+  // The proxy expects: abi.encode(tokenAddress, tokenId, data)
+  // This will be appended to the calldata after the standard transferFrom parameters
+  const extension = encodeAbiParameters(
+    [
+      { name: "token", type: "address" },
+      { name: "tokenId", type: "uint256" },
+      { name: "data", type: "bytes" },
+    ],
+    [maker1155.token, maker1155.tokenId, maker1155.data as `0x${string}`]
+  );
+
   // For ERC-1155, we use the proxy address as makerAsset
-  // The actual token address, tokenId, and amount are encoded in the extension
   const order: LimitOrder = {
     salt: nonce,
     maker: makerAddress,
-    receiver: makerAddress, // receiver is typically same as maker
-    makerAsset: "0x639e4E6cFF7d9a9bcFCa09ac8282CF037D40f9Fd" as Address, // ERC1155_PROXY_ADDRESS
+    receiver: makerAddress,
+    makerAsset: ERC1155_PROXY_ADDRESS,
     takerAsset: takerAsset,
     makingAmount: maker1155.amount,
     takingAmount: takerAmount,
     makerTraits,
   };
-
-  // Build extension data for ERC-1155
-  // Extension format: tokenId (32 bytes) + token address (20 bytes) + data
-  const extension = encodeAbiParameters(
-    [
-      { name: "tokenId", type: "uint256" },
-      { name: "token", type: "address" },
-      { name: "data", type: "bytes" },
-    ],
-    [maker1155.tokenId, maker1155.token, maker1155.data as `0x${string}`]
-  );
 
   // Calculate order hash
   const orderHash = getOrderHash(order);
@@ -138,10 +136,11 @@ export function buildLimitOrder1155(params: {
   return {
     order: {
       ...order,
-      extension, // Add extension to order object
-    } as any,
+      extension, // Add extension to order object for convenience
+    },
     typedData,
     orderHash,
+    extension, // Also return extension separately
   };
 }
 

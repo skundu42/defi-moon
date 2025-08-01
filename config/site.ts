@@ -1,7 +1,10 @@
+import { Logo } from "@/components/icons";
+
 export type SiteConfig = typeof siteConfig;
 
 export const siteConfig = {
   name: "DeFi Moon",
+  Logo: `./`,
   description: "DeFi with 1inch",
   navItems: [
     {

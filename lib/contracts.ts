@@ -1,10 +1,3 @@
-// lib/contracts.ts
-/* eslint-disable @typescript-eslint/no-unused-vars */
-
-import type { Address } from "viem";
-
-/* ----------------------------- Hardcoded Constants ---------------------------- */
-
 export const CHAIN_ID = 100; // Gnosis Chain
 export const RPC_URL = "https://rpc.gnosis.gateway.fm";
 export const EXPLORER_URL = "https://gnosisscan.io";
@@ -12,26 +5,21 @@ export const EXPLORER_URL = "https://gnosisscan.io";
 /** 1inch Limit Order Protocol v4 (Gnosis) - HARDCODED */
 export const LOP_V4_GNOSIS = "0x111111125421ca6dc452d289314280a0f8842a65" as const;
 
-/** 1inch Orderbook API (v4) - HARDCODED */
-export const ORDERBOOK_API_BASE = "https://orderbook-api.1inch.io";
-
-/** Public 1inch key - HARDCODED */
-export const ONEINCH_AUTH_KEY = "ODrGxQos9xJl5z1SDacSSkmOVkFTtWyZ";
 
 /** Core contracts - HARDCODED */
-export const VAULT_ADDRESS = "0xB4048ce69523CF463bC37b648279e6EF66CaEBAf" as const;
-export const CALLTOKEN_ADDRESS = "0x7b964e3dC49DAcB3971CA49f53629e2e11885016" as const;
+export const VAULT_ADDRESS = "0x486a9F394031FFBB3A90647427880e1a990cA60c" as const;
+export const CALLTOKEN_ADDRESS = "0x9E5778b975d7249b28c8b78A253e8e1F39FcBCa0" as const;
 
 /** ERC-1155 proxy - HARDCODED */
-export const ERC1155_PROXY_ADDRESS = "0x639e4E6cFF7d9a9bcFCa09ac8282CF037D40f9Fd" as const;
+export const ERC1155_PROXY_ADDRESS = "0x68Ccc1691AC63e0Ca99a3a4b4b61301d54CD2c0E" as const;
 
 /** Oracle for GNO/WXDAI - HARDCODED */
-export const ORACLE_GNO_WXDAI = "0xf3FcEd095bDD651b1Ea24F46EE5645Ab4169e955" as const;
+export const ORACLE_GNO_WXDAI = "0x22441d81416430A54336aB28765abd31a792Ad37" as const;
 
 /** Token addresses - HARDCODED */
 export const TOKEN_ADDRESSES = {
   WXDAI: "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d" as const,
-  USDC: "0xddafbb505ad214d7b80b1f830fccc89b60fb7a83" as const,
+  USDC: "0x2a22f9c3b484c3629090FeED35F17Ff8F88f76F0" as const,
   WETH: "0x6A023CCd1ff6F2045C3309768eAd9E68F978f6e1" as const,
   GNO: "0x9C58BAcC331c9aa871AFD802DB6379a98e80CEdb" as const,
 };
@@ -460,8 +448,6 @@ export const ADDRESSES = {
   rpcUrl: RPC_URL,
   explorer: EXPLORER_URL,
   oneInchLopV4: LOP_V4_GNOSIS,
-  orderbookApiBase: ORDERBOOK_API_BASE,
-  oneInchAuthKey: ONEINCH_AUTH_KEY,
   vault: VAULT_ADDRESS,
   callToken1155: CALLTOKEN_ADDRESS,
   erc1155Proxy: ERC1155_PROXY_ADDRESS,

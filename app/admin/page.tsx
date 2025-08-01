@@ -1,7 +1,7 @@
 // app/admin/series/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   useAccount,
   useReadContract,
@@ -96,53 +96,63 @@ export default function AdminDefineSeriesPage() {
     return Math.min(100, Math.max(0, Math.round((done / span) * 100)));
   }, [scanFrom, scanTo, scanAt]);
 
+  // Helper function to verify transaction success
+  const verifyTransactionSuccess = useCallback(async (txHash: `0x${string}`) => {
+    if (!client) return false;
+    try {
+      const receipt = await client.getTransactionReceipt({ hash: txHash });
+      return receipt.status === "success";
+    } catch {
+      return false;
+    }
+  }, [client]);
+
   // Backfill (chunked getLogs) — re-runs when fromBlockOverride changes
-  useEffect(() => {
+  const loadSeries = useCallback(async () => {
     if (!client) return;
 
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        setRows([]); // reset table for new scan
-        setScanFrom(null);
-        setScanTo(null);
-        setScanAt(null);
+    try {
+      setLoading(true);
+      setRows([]); // reset table for new scan
+      setScanFrom(null);
+      setScanTo(null);
+      setScanAt(null);
 
-        const latest = await client.getBlockNumber();
-        if (cancelled) return;
-        setLatestBlock(latest);
+      const latest = await client.getBlockNumber();
+      setLatestBlock(latest);
 
-        const override = fromBlockOverride.trim();
-        const hasOverride = override.length > 0 && /^\d+$/.test(override);
-        const DEFAULT_SPAN = 200_000n;
-        const fromBlock = hasOverride
-          ? BigInt(override)
-          : ENV_DEPLOY_BLOCK !== undefined
-          ? ENV_DEPLOY_BLOCK
-          : latest > DEFAULT_SPAN
-          ? latest - DEFAULT_SPAN
-          : 0n;
+      const override = fromBlockOverride.trim();
+      const hasOverride = override.length > 0 && /^\d+$/.test(override);
+      const DEFAULT_SPAN = 200_000n;
+      const fromBlock = hasOverride
+        ? BigInt(override)
+        : ENV_DEPLOY_BLOCK !== undefined
+        ? ENV_DEPLOY_BLOCK
+        : latest > DEFAULT_SPAN
+        ? latest - DEFAULT_SPAN
+        : 0n;
 
-        const step = 10_000n; // conservative chunk size
-        setScanFrom(fromBlock);
-        setScanTo(latest);
+      const step = 10_000n; // conservative chunk size
+      setScanFrom(fromBlock);
+      setScanTo(latest);
 
-        const acc: SeriesRow[] = [];
+      const acc: SeriesRow[] = [];
 
-        for (let start = fromBlock; start <= latest; start += step + 1n) {
-          if (cancelled) return;
-          const end = start + step > latest ? latest : start + step;
-          setScanAt(end);
+      for (let start = fromBlock; start <= latest; start += step + 1n) {
+        const end = start + step > latest ? latest : start + step;
+        setScanAt(end);
 
-          const logs = await client.getLogs({
-            address: VAULT_ADDRESS,
-            event: SERIES_DEFINED,
-            fromBlock: start,
-            toBlock: end,
-          });
+        const logs = await client.getLogs({
+          address: VAULT_ADDRESS,
+          event: SERIES_DEFINED,
+          fromBlock: start,
+          toBlock: end,
+        });
 
-          for (const l of logs) {
+        // Verify each transaction was successful before adding to results
+        for (const l of logs) {
+          const isSuccessful = await verifyTransactionSuccess(l.transactionHash!);
+          if (isSuccessful) {
             acc.push({
               id: l.args.id as bigint,
               underlying: l.args.underlying as `0x${string}`,
@@ -153,40 +163,44 @@ export default function AdminDefineSeriesPage() {
             });
           }
         }
-
-        // de-dup + sort
-        const map = new Map<string, SeriesRow>();
-        for (const r of acc) map.set(r.id.toString(), r);
-        const list = Array.from(map.values()).sort((a, b) =>
-          a.expiry === b.expiry
-            ? Number(b.blockNumber - a.blockNumber)
-            : Number(b.expiry - a.expiry)
-        );
-
-        if (!cancelled) setRows(list);
-      } catch (err) {
-        if (!cancelled) console.error("Series backfill error:", err);
-      } finally {
-        if (!cancelled) setLoading(false);
       }
-    })();
 
-    return () => {
-      cancelled = true;
-    };
-  }, [client, fromBlockOverride]);
+      // de-dup + sort
+      const map = new Map<string, SeriesRow>();
+      for (const r of acc) map.set(r.id.toString(), r);
+      const list = Array.from(map.values()).sort((a, b) =>
+        a.expiry === b.expiry
+          ? Number(b.blockNumber - a.blockNumber)
+          : Number(b.expiry - a.expiry)
+      );
 
-  // Live watcher
+      setRows(list);
+    } catch (err) {
+      console.error("Series backfill error:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [client, fromBlockOverride, verifyTransactionSuccess]);
+
+  useEffect(() => {
+    loadSeries();
+  }, [loadSeries]);
+
+  // Live watcher - also verify transaction success
   useWatchContractEvent({
     address: VAULT_ADDRESS,
     abi: vaultAbi,
     eventName: "SeriesDefined",
-    onLogs(logs) {
-      setRows((prev) => {
-        const map = new Map<string, SeriesRow>();
-        for (const r of prev) map.set(r.id.toString(), r);
-        for (const l of logs) {
-          map.set((l.args?.id as bigint).toString(), {
+    onLogs: useCallback(async (logs) => {
+      if (!client) return;
+
+      const verifiedSeries: SeriesRow[] = [];
+      
+      // Verify each log's transaction was successful
+      for (const l of logs) {
+        const isSuccessful = await verifyTransactionSuccess(l.transactionHash!);
+        if (isSuccessful) {
+          verifiedSeries.push({
             id: l.args?.id as bigint,
             underlying: l.args?.underlying as `0x${string}`,
             strike: l.args?.strike as bigint,
@@ -195,14 +209,24 @@ export default function AdminDefineSeriesPage() {
             blockNumber: l.blockNumber!,
           });
         }
-        const list = Array.from(map.values()).sort((a, b) =>
-          a.expiry === b.expiry
-            ? Number(b.blockNumber - a.blockNumber)
-            : Number(b.expiry - a.expiry)
-        );
-        return list;
-      });
-    },
+      }
+
+      if (verifiedSeries.length > 0) {
+        setRows((prev) => {
+          const map = new Map<string, SeriesRow>();
+          for (const r of prev) map.set(r.id.toString(), r);
+          for (const series of verifiedSeries) {
+            map.set(series.id.toString(), series);
+          }
+          const list = Array.from(map.values()).sort((a, b) =>
+            a.expiry === b.expiry
+              ? Number(b.blockNumber - a.blockNumber)
+              : Number(b.expiry - a.expiry)
+          );
+          return list;
+        });
+      }
+    }, [client, verifyTransactionSuccess]),
   });
 
   const nowSec = Math.floor(Date.now() / 1000);
@@ -213,8 +237,16 @@ export default function AdminDefineSeriesPage() {
 
   const scanning = loading && (scanFrom !== null && scanTo !== null);
 
+  const handleShowExpiredChange = useCallback((value: boolean) => {
+    setShowExpired(value);
+  }, []);
+
+  const handleFromBlockChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setFromBlockOverride(e.target.value);
+  }, []);
+
   return (
-    <section className="mx-auto max-w-5xl py-8 md:py-12 space-y-6">
+    <section className="mx-auto max-w-6xl py-8 md:py-12 space-y-6">
       <div>
         <h1 className="text-2xl font-semibold">Admin — Define Option Series</h1>
         <p className="text-default-500">
@@ -234,21 +266,21 @@ export default function AdminDefineSeriesPage() {
           {!isLoading && isAdmin === false && (
             <Card className="p-4 border-warning text-warning">
               <p>
-                You’re connected as <span className="font-mono">{address}</span>, but this
+                You're connected as <span className="font-mono">{address}</span>, but this
                 address does not have <span className="font-mono">SERIES_ADMIN_ROLE</span>. You can
                 fill the form; transactions will revert if the role is missing.
               </p>
             </Card>
           )}
-          <DefineSeriesForm />
+          <DefineSeriesForm onSeriesCreated={loadSeries} />
         </>
       )}
 
       {/* Controls */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <Checkbox
           isSelected={showExpired}
-          onValueChange={setShowExpired}
+          onValueChange={handleShowExpiredChange}
           className="text-sm"
           isDisabled={loading}
         >
@@ -264,7 +296,7 @@ export default function AdminDefineSeriesPage() {
               ENV_DEPLOY_BLOCK !== undefined ? ENV_DEPLOY_BLOCK.toString() : "auto"
             }
             value={fromBlockOverride}
-            onChange={(e) => setFromBlockOverride(e.target.value)}
+            onChange={handleFromBlockChange}
             classNames={{ inputWrapper: "h-9 bg-default-100", input: "text-sm" }}
             isDisabled={loading}
           />
@@ -281,7 +313,7 @@ export default function AdminDefineSeriesPage() {
         <div className="flex items-center gap-2 rounded-xl border border-default-200/50 bg-content2 p-3 text-sm">
           <Spinner size="sm" />
           <div className="flex-1">
-            Scanning logs {scanFrom?.toString()} → {scanTo?.toString()}…
+            Scanning logs {scanFrom?.toString()} → {scanTo?.toString()}… (verifying transactions)
             <span className="ml-2 font-medium">{progressPct}%</span>
           </div>
         </div>
@@ -305,7 +337,9 @@ export default function AdminDefineSeriesPage() {
           </div>
         </Card>
       ) : displayRows.length === 0 ? (
-        <Card className="p-3 text-sm text-foreground/70">No series found.</Card>
+        <Card className="p-3 text-sm text-foreground/70">
+          {loading ? "Verifying transactions..." : "No series found."}
+        </Card>
       ) : (
         <Card className="p-0 overflow-x-auto">
           <table className="min-w-full text-sm">
@@ -325,7 +359,7 @@ export default function AdminDefineSeriesPage() {
                 const expired = Number(r.expiry) <= nowSec;
                 return (
                   <tr key={r.id.toString()} className="border-t border-default-200/50">
-                    <td className="p-3 font-mono">{r.id.toString()}</td>
+                    <td className="p-3 font-mono text-xs break-all">{r.id.toString()}</td>
                     <td className="p-3">{symFromAddress(r.underlying)}</td>
                     <td className="p-3">{formatStrike(r.strike)}</td>
                     <td className="p-3">{formatDateUTC(r.expiry)}</td>
@@ -346,7 +380,7 @@ export default function AdminDefineSeriesPage() {
                       <Link
                         isExternal
                         href={`${EXPLORER}/tx/${r.txHash}`}
-                        className="font-mono text-primary"
+                        className="font-mono text-primary text-xs"
                         title={r.txHash}
                       >
                         {r.txHash.slice(0, 10)}…{r.txHash.slice(-6)}

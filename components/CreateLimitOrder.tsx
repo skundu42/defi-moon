@@ -40,7 +40,6 @@ import { submitOrder, cancelOrderInApi } from "@/lib/orderApi";
 // --- Contract Addresses ---
 const ERC1155_TRANSFER_PROXY_ADDRESS = "0x639e4E6cFF7d9a9bcFCa09ac8282CF037D40f9Fd" as ViemAddress;
 
-
 // --- Event ABI for SeriesDefined ---
 const SERIES_DEFINED = parseAbiItem(
   "event SeriesDefined(uint256 indexed id, address indexed underlying, uint256 strike, uint64 expiry)"
@@ -93,20 +92,17 @@ type CreatedOrder = {
 };
 
 export default function CreateLimitOrder() {
-  // Wallet / signer
   const { address, isConnected } = useAccount();
   const { signTypedDataAsync } = useSignTypedData();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
 
-  // Series state
   const [allSeries, setAllSeries] = useState<SeriesData[]>([]);
   const [loadingSeries, setLoadingSeries] = useState(true);
   const bootRef = useRef(false);
 
   const loadSeries = useCallback(async () => {
     if (!publicClient) return;
-    
     setLoadingSeries(true);
     try {
       const latest = await publicClient.getBlockNumber();
@@ -114,7 +110,6 @@ export default function CreateLimitOrder() {
       const from = latest > span ? latest - span : 0n;
       const step = 20_000n;
       const acc: SeriesData[] = [];
-      
       for (let b = from; b <= latest; b += step + 1n) {
         const to = b + step > latest ? latest : b + step;
         const logs = await publicClient.getLogs({
@@ -123,7 +118,6 @@ export default function CreateLimitOrder() {
           fromBlock: b,
           toBlock: to,
         });
-        
         for (const l of logs) {
           if (l.args.id && l.args.strike && l.args.expiry) {
             acc.push({
@@ -134,7 +128,6 @@ export default function CreateLimitOrder() {
           }
         }
       }
-      
       const dedup = new Map<string, SeriesData>();
       acc.forEach((r) => dedup.set(r.id.toString(), r));
       setAllSeries(
@@ -155,7 +148,6 @@ export default function CreateLimitOrder() {
     loadSeries();
   }, [publicClient, loadSeries]);
 
-  // Listen for new series additions live
   useWatchContractEvent({
     address: VAULT_ADDRESS,
     abi: vaultAbi,
@@ -185,14 +177,12 @@ export default function CreateLimitOrder() {
     [allSeries, now]
   );
 
-  // Check ERC1155TransferProxy contract availability by checking if it has bytecode
   const [proxyExists, setProxyExists] = useState<boolean | null>(null);
   const [proxyCheckError, setProxyCheckError] = useState<string | null>(null);
 
   useEffect(() => {
     const checkProxy = async () => {
       if (!publicClient) return;
-      
       try {
         const code = await publicClient.getBytecode({ address: ERC1155_TRANSFER_PROXY_ADDRESS });
         if (code && code !== "0x") {
@@ -207,11 +197,9 @@ export default function CreateLimitOrder() {
         setProxyCheckError(error.message || "Failed to check contract");
       }
     };
-
     checkProxy();
   }, [publicClient]);
 
-  // ERC1155 approval for transfer proxy
   const { data: isApprovedForProxy = false, refetch: refetchApproval } = useReadContract({
     address: CALLTOKEN_ADDRESS,
     abi: erc1155Abi,
@@ -220,7 +208,6 @@ export default function CreateLimitOrder() {
     query: { enabled: Boolean(address) },
   });
 
-  // Form state
   const [selectedSeriesId, setSelectedSeriesId] = useState<bigint | null>(null);
   const [qtyStr, setQtyStr] = useState("");
   const [takerSym, setTakerSym] = useState<TokenSymbol>("WXDAI");
@@ -232,21 +219,19 @@ export default function CreateLimitOrder() {
 
   const addNotice = useCallback((msg: string) => {
     setNotices((n) => {
-      const newNotices = [msg, ...n.slice(0, 4)]; // Keep only last 5 notices
-      return Array.from(new Set(newNotices)); // Remove duplicates
+      const newNotices = [msg, ...n.slice(0, 4)];
+      return Array.from(new Set(newNotices));
     });
   }, []);
 
-  // Clear old notices automatically
   useEffect(() => {
     if (notices.length === 0) return;
     const timer = setTimeout(() => {
-      setNotices(prev => prev.slice(1)); // Remove oldest notice
+      setNotices(prev => prev.slice(1));
     }, 8000);
     return () => clearTimeout(timer);
   }, [notices]);
 
-  // Check user's option balance for selected series
   const { data: optionBalance = 0n } = useReadContract({
     address: CALLTOKEN_ADDRESS,
     abi: erc1155Abi,
@@ -255,7 +240,6 @@ export default function CreateLimitOrder() {
     query: { enabled: Boolean(address && selectedSeriesId) },
   });
 
-  // Watch for order fills
   useWatchContractEvent({
     address: LOP_V4_ADDRESS,
     abi: lopV4Abi,
@@ -265,24 +249,27 @@ export default function CreateLimitOrder() {
         const filledHash = log.args.orderHash;
         if (filledHash && createdOrders.some((o) => o.hash === filledHash)) {
           addNotice(`🎉 Order ${filledHash.slice(0, 10)}... has been filled!`);
-          // Remove filled order from the list
           setCreatedOrders(prev => prev.filter(o => o.hash !== filledHash));
         }
       });
     },
   });
 
-  // Approve proxy handler
   const onApproveProxy = useCallback(async () => {
     if (!address) return;
     try {
       addNotice("📝 Approving ERC1155TransferProxy...");
-      await writeContractAsync({
+      const res = await writeContractAsync({
         address: CALLTOKEN_ADDRESS,
         abi: erc1155Abi,
         functionName: "setApprovalForAll",
         args: [ERC1155_TRANSFER_PROXY_ADDRESS as ViemAddress, true],
       });
+      if (res && typeof (res as any).wait === "function") {
+        await (res as any).wait();
+      } else {
+        await new Promise((r) => setTimeout(r, 2500));
+      }
       await refetchApproval();
       addNotice("✅ ERC1155TransferProxy approved successfully!");
     } catch (error: any) {
@@ -290,13 +277,11 @@ export default function CreateLimitOrder() {
     }
   }, [address, writeContractAsync, addNotice, refetchApproval]);
 
-  // Create limit order
   const onCreate = useCallback(async () => {
     if (!address) return addNotice("🔌 Please connect your wallet");
     if (!selectedSeriesId) return addNotice("📑 Please select an option series");
     if (!isApprovedForProxy) return addNotice("⚠️ Please approve the transfer proxy first");
 
-    // Validate quantity
     let qty: bigint;
     try {
       qty = BigInt(qtyStr);
@@ -306,7 +291,6 @@ export default function CreateLimitOrder() {
     if (qty <= 0n) return addNotice("⚠️ Quantity must be greater than 0");
     if (qty > optionBalance) return addNotice("⚠️ Insufficient option balance");
 
-    // Validate taker amount
     const decimals = DECIMALS[takerSym];
     let takerAmt: bigint;
     try {
@@ -322,8 +306,6 @@ export default function CreateLimitOrder() {
     setSubmitting(true);
     try {
       addNotice("🔄 Creating and signing order...");
-      
-      // Create order using your buildLimitOrder1155 function
       const { order, typedData, orderHash } = buildLimitOrder1155({
         makerAddress: address,
         maker1155: {
@@ -334,11 +316,10 @@ export default function CreateLimitOrder() {
         },
         takerAsset,
         takerAmount: takerAmt,
-        expirationSec: 7 * 24 * 60 * 60, // 7 days
+        expirationSec: 7 * 24 * 60 * 60,
         allowPartialFill: true,
       });
 
-      // Sign the order
       const signature = await signTypedDataAsync({
         domain: typedData.domain,
         types: typedData.types,
@@ -346,10 +327,8 @@ export default function CreateLimitOrder() {
         message: typedData.message,
       });
 
-      // Submit to orderbook using your API
       await submitOrder(order, signature, orderHash);
 
-      // Store created order
       const createdOrder: CreatedOrder = {
         hash: orderHash,
         order,
@@ -363,15 +342,20 @@ export default function CreateLimitOrder() {
 
       setOrderHash(orderHash);
       setCreatedOrders((prev) => [createdOrder, ...prev]);
-      
+
       addNotice(`🎉 Order created successfully!`);
       addNotice(`📋 Order hash: ${orderHash.slice(0, 16)}...`);
       addNotice(`📈 Selling ${qty.toString()} options for ${formatUnits(takerAmt, decimals)} ${takerSym}`);
-      
-      // Clear form
+
       setQtyStr("");
       setTakerAmountStr("");
-      
+
+      // notify orderbook to refresh
+      window.dispatchEvent(
+        new CustomEvent("limit-order-created", {
+          detail: { orderHash },
+        })
+      );
     } catch (error: any) {
       console.error("Order creation error:", error);
       addNotice(`❌ Order creation failed: ${error?.message || String(error)}`);
@@ -390,23 +374,17 @@ export default function CreateLimitOrder() {
     addNotice,
   ]);
 
-  // Cancel order
   const onCancelOrder = useCallback(async (createdOrder: CreatedOrder) => {
     if (!address) return;
     try {
       addNotice(`🔄 Cancelling order ${createdOrder.hash.slice(0, 10)}...`);
-      
-      // On-chain cancel using your LOP v4 ABI
       await writeContractAsync({
         address: LOP_V4_ADDRESS,
         abi: lopV4Abi,
         functionName: "cancelOrder",
         args: [BigInt(createdOrder.order.makerTraits), createdOrder.hash as `0x${string}`],
       });
-
-      // Cancel in API
       await cancelOrderInApi(createdOrder.hash);
-      
       addNotice(`✅ Order ${createdOrder.hash.slice(0, 10)}... cancelled successfully`);
       setCreatedOrders((prev) =>
         prev.filter((o) => o.hash.toLowerCase() !== createdOrder.hash.toLowerCase())
@@ -416,10 +394,9 @@ export default function CreateLimitOrder() {
     }
   }, [address, writeContractAsync, addNotice]);
 
-  // Event handlers
   const handleSeriesSelection = useCallback((keys: any) => {
     const arr = Array.from(keys);
-    if (arr[0] && typeof arr[0] === 'string') {
+    if (arr[0] && typeof arr[0] === "string") {
       try {
         setSelectedSeriesId(BigInt(arr[0]));
       } catch {
@@ -435,8 +412,8 @@ export default function CreateLimitOrder() {
     setTakerSym(selectedKey);
   }, []);
 
-  const selectedSeries = useMemo(() => 
-    activeSeries.find(s => s.id === selectedSeriesId),
+  const selectedSeries = useMemo(
+    () => activeSeries.find((s) => s.id === selectedSeriesId),
     [activeSeries, selectedSeriesId]
   );
 
@@ -715,7 +692,7 @@ export default function CreateLimitOrder() {
                     <div className="text-xs text-default-500">Price per Option</div>
                     <div className="font-medium">
                       {(
-                        parseFloat(formatUnits(orderData.takerAmount, DECIMALS[orderData.takerToken as TokenSymbol])) / 
+                        parseFloat(formatUnits(orderData.takerAmount, DECIMALS[orderData.takerToken as TokenSymbol])) /
                         parseFloat(orderData.amount.toString())
                       ).toFixed(4)} {orderData.takerToken}
                     </div>

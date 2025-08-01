@@ -36,7 +36,11 @@ function isHexAddress(s: string): s is `0x${string}` {
 
 type Notice = { id: string; type: "success" | "error"; text: string };
 
-export default function DefineSeriesForm() {
+type DefineSeriesFormProps = {
+  onSeriesCreated?: () => void;
+};
+
+export default function DefineSeriesForm({ onSeriesCreated }: DefineSeriesFormProps) {
   const { writeContractAsync, isPending: isSubmitting } = useWriteContract();
   const publicClient = usePublicClient();
 
@@ -77,23 +81,8 @@ export default function DefineSeriesForm() {
     setNotices((n) => n.filter((x) => x.id !== id));
   }, []);
 
-  // re-broadcast on-chain events
-  useWatchContractEvent({
-    address: VAULT_ADDRESS,
-    abi: vaultAbi,
-    eventName: "SeriesDefined",
-    onLogs(logs) {
-      for (const log of logs) {
-        const detail = {
-          id: (log.args.id as bigint).toString(),
-          underlying: log.args.underlying as `0x${string}`,
-          strike: log.args.strike as bigint,
-          expiry: log.args.expiry as bigint,
-        };
-        window.dispatchEvent(new CustomEvent("series:defined", { detail }));
-      }
-    },
-  });
+  // Remove the problematic event watcher that was causing false positives
+  // The parent component will handle refreshing the series list
 
   const handleUnderlyingChange = useCallback((keys: any) => {
     const selectedKey = Array.from(keys as Set<string>)[0] as TokenSymbol;
@@ -169,15 +158,25 @@ export default function DefineSeriesForm() {
       pushNotice("success", "Transaction submitted! Waiting for confirmation...");
 
       // wait for on-chain confirmation
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
-
-      pushNotice("success", "Series defined successfully!");
-
-      // reset form
-      setStrikeHuman("");
-      setExpiryIso("");
-      setCollatHuman("");
-      setOracleAddr("");
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+      
+      // Check if transaction was successful
+      if (receipt.status === "success") {
+        pushNotice("success", "Series defined successfully!");
+        
+        // Trigger parent component to refresh series list
+        if (onSeriesCreated) {
+          onSeriesCreated();
+        }
+        
+        // reset form
+        setStrikeHuman("");
+        setExpiryIso("");
+        setCollatHuman("");
+        setOracleAddr("");
+      } else {
+        pushNotice("error", "Transaction was reverted. Please check your inputs and try again.");
+      }
     } catch (error: any) {
       console.error("DefineSeriesForm error:", error);
       
@@ -222,6 +221,14 @@ export default function DefineSeriesForm() {
 
   return (
     <Card className="p-6 space-y-6 max-w-6xl mx-auto">
+      <div className="text-center">
+        <h3 className="text-xl font-semibold mb-2">
+          Define New Option Series
+        </h3>
+        <p className="text-sm text-default-600">
+          Create a new option series for trading
+        </p>
+      </div>
 
       {/* Notifications */}
       {notices.length > 0 && (

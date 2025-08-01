@@ -66,23 +66,31 @@ export async function submitOrder(
   signature: string,
   orderHash: string
 ): Promise<void> {
+  // Extract extension from order if it exists
+  const extension = order.extension || "0x";
+  
+  // Create clean order object without extension
+  const cleanOrder = {
+    salt: order.salt.toString(),
+    maker: order.maker,
+    receiver: order.receiver,
+    makerAsset: order.makerAsset,
+    takerAsset: order.takerAsset,
+    makingAmount: order.makingAmount.toString(),
+    takingAmount: order.takingAmount.toString(),
+    makerTraits: order.makerTraits.toString(),
+  };
+
   const orderData = {
-    order: {
-      salt: order.salt.toString(),
-      maker: order.maker,
-      receiver: order.receiver,
-      makerAsset: order.makerAsset,
-      takerAsset: order.takerAsset,
-      makingAmount: order.makingAmount.toString(),
-      takingAmount: order.takingAmount.toString(),
-      makerTraits: order.makerTraits.toString(),
-    },
+    order: cleanOrder,
     signature,
-    extension: order.extension || "0x",
+    extension, // Pass extension separately
     orderHash,
   };
 
   try {
+    console.log("Submitting order with data:", orderData);
+    
     const response = await fetch(API_BASE, {
       method: "POST",
       headers: {

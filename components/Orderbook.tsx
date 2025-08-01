@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useAccount, useWriteContract, useReadContract, usePublicClient } from "wagmi";
 import { Address as ViemAddress, formatUnits } from "viem";
 import { Button } from "@heroui/button";
@@ -32,6 +32,7 @@ const DECIMALS: Record<string, number> = {
   WXDAI: 18,
   USDC: 6,
   WETH: 18,
+  GNO: 18,
 };
 
 function Info({ tip }: { tip: string }) {
@@ -78,9 +79,12 @@ type OrderRowProps = {
 function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: OrderRowProps) {
   const { address, isConnected } = useAccount();
   const publicClient = usePublicClient();
-  const { writeContractAsync } = useWriteContract();
+  const { writeContractAsync, isPending } = useWriteContract();
 
-  const { seriesId, hasExtension } = parseERC1155Extension(order.extension);
+  const { seriesId, hasExtension } = useMemo(() => 
+    parseERC1155Extension(order.extension), 
+    [order.extension]
+  );
 
   // Payment token allowance check
   const { data: allowance = 0n } = useReadContract({
@@ -91,53 +95,107 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
     query: { enabled: Boolean(address) },
   });
 
-  const takerToken = getTokenSymbol(order.takerAsset);
-  const decimals = DECIMALS[takerToken as keyof typeof DECIMALS] ?? 18;
+  const orderInfo = useMemo(() => {
+    const takerToken = getTokenSymbol(order.takerAsset);
+    const decimals = DECIMALS[takerToken as keyof typeof DECIMALS] ?? 18;
+    
+    // safer price representation: avoid Number conversion
+    const making = BigInt(order.makingAmount);
+    const taking = BigInt(order.takingAmount);
+    
+    // Better price calculation - handle decimals properly
+    const pricePerOptionStr = making === 0n ? "0" : (() => {
+      try {
+        // Convert to proper decimal representation
+        const priceWei = (taking * 10n ** 18n) / making; // Scale up to avoid precision loss
+        const priceFormatted = formatUnits(priceWei, 18);
+        const priceNum = parseFloat(priceFormatted);
+        
+        if (priceNum >= 1000) {
+          return priceNum.toFixed(0);
+        } else if (priceNum >= 1) {
+          return priceNum.toFixed(2);
+        } else if (priceNum >= 0.01) {
+          return priceNum.toFixed(4);
+        } else {
+          return priceNum.toFixed(6);
+        }
+      } catch {
+        return "0";
+      }
+    })();
 
-  // safer price representation: avoid Number conversion
-  const making = BigInt(order.makingAmount);
-  const taking = BigInt(order.takingAmount);
-  const pricePerOptionStr =
-    making === 0n
-      ? "0"
-      : (() => {
-          // represent as fixed-point with 6 decimals for display
-          const scale = 10n ** 6n;
-          const scaled = (taking * scale) / making;
-          const integer = scaled / scale;
-          const fraction = scaled % scale;
-          return `${integer}.${fraction.toString().padStart(6, "0")}`;
-        })();
+    const totalPrice = (() => {
+      try {
+        const formatted = formatUnits(taking, decimals);
+        const num = parseFloat(formatted);
+        if (num >= 1000) return num.toFixed(0);
+        if (num >= 1) return num.toFixed(2);
+        if (num >= 0.001) return num.toFixed(4);
+        return num.toFixed(6);
+      } catch {
+        return "0";
+      }
+    })();
 
-  const totalPrice = formatUnits(taking, decimals);
-  const optionsAmountDisplay = formatUnits(making, 0); // assuming options are integer counts
-  const expiryTs = Number(getExpiration(BigInt(order.order.makerTraits))) * 1000;
-  const info = {
-    takerToken,
-    pricePerOption: pricePerOptionStr,
-    totalPrice,
-    expiry: new Date(expiryTs),
-    allowsPartial: allowsPartialFill(BigInt(order.order.makerTraits)),
-    isActive: isOrderActive(BigInt(order.order.makerTraits)),
-    seriesId: seriesId.toString(),
-  };
+    const optionsAmountDisplay = formatUnits(making, 0); // assuming options are integer counts
+    const expiryTs = Number(getExpiration(BigInt(order.order.makerTraits))) * 1000;
+    
+    // Format series ID for better display
+    const shortSeriesId = seriesId.toString().length > 20 
+      ? `${seriesId.toString().slice(0, 8)}...${seriesId.toString().slice(-8)}`
+      : seriesId.toString();
+    
+    return {
+      takerToken,
+      decimals,
+      pricePerOption: pricePerOptionStr,
+      totalPrice,
+      optionsAmountDisplay,
+      expiry: new Date(expiryTs),
+      allowsPartial: allowsPartialFill(BigInt(order.order.makerTraits)),
+      isActive: isOrderActive(BigInt(order.order.makerTraits)),
+      seriesId: seriesId.toString(),
+      shortSeriesId,
+      making,
+      taking,
+    };
+  }, [order, seriesId]);
 
   const needsApproval = allowance < BigInt(order.takingAmount);
-  const parsedFillPercent = (() => {
+  
+  const parsedFillPercent = useMemo(() => {
     const n = parseInt(fillPercent, 10);
     if (isNaN(n) || n <= 0) return 100;
     if (n > 100) return 100;
     return n;
-  })();
+  }, [fillPercent]);
 
-  const fillOrder = async (percent: number) => {
+  const handleApproval = useCallback(async () => {
+    if (!address) return;
+    
+    try {
+      addNotice(`⏳ Approving ${orderInfo.takerToken}...`);
+      await writeContractAsync({
+        address: order.takerAsset as ViemAddress,
+        abi: erc20Abi,
+        functionName: "approve",
+        args: [LOP_V4_ADDRESS as ViemAddress, 2n ** 256n - 1n],
+      });
+      addNotice(`✅ ${orderInfo.takerToken} approved`);
+    } catch (error: any) {
+      addNotice(`❌ Approval failed: ${error?.shortMessage || error?.message || "Unknown error"}`);
+    }
+  }, [address, order.takerAsset, orderInfo.takerToken, writeContractAsync, addNotice]);
+
+  const fillOrder = useCallback(async (percent: number) => {
     if (!address || !publicClient) return;
-    if (!info.isActive) {
+    if (!orderInfo.isActive) {
       addNotice("❌ Order is not active");
       return;
     }
 
-    addNotice(`⏳ Filling ${percent}% of ERC-1155 order ${order.orderHash}...`);
+    addNotice(`⏳ Filling ${percent}% of ERC-1155 order ${order.orderHash.slice(0, 10)}...`);
 
     try {
       // Build the full order struct for 1inch
@@ -180,17 +238,17 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
 
       // Approve payment token if needed
       if (needsApproval) {
-        addNotice(`⏳ Approving ${takerToken}...`);
+        addNotice(`⏳ Approving ${orderInfo.takerToken}...`);
         await writeContractAsync({
           address: order.takerAsset as ViemAddress,
           abi: erc20Abi,
           functionName: "approve",
           args: [LOP_V4_ADDRESS as ViemAddress, takingAmount * 2n],
         });
-        addNotice(`✅ ${takerToken} approved`);
+        addNotice(`✅ ${orderInfo.takerToken} approved`);
       }
 
-      addNotice(`📋 Filling ERC-1155 order for Series ${seriesId}`);
+      addNotice(`📋 Filling ERC-1155 order for Series ${seriesId.toString()}`);
 
       const txHash = await writeContractAsync({
         address: LOP_V4_ADDRESS,
@@ -205,26 +263,37 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
         ],
       });
 
-      addNotice(`🎉 ERC-1155 options purchased! TX: ${txHash}`);
+      addNotice(`🎉 ERC-1155 options purchased! TX: ${txHash.slice(0, 10)}...`);
       await markOrderFilled(order.orderHash, txHash);
       onFilled();
-    } catch (e: any) {
-      addNotice(`❌ Fill failed: ${e?.shortMessage || e?.message || String(e)}`);
-      console.error("Fill error:", e);
+    } catch (error: any) {
+      console.error("Fill error:", error);
+      addNotice(`❌ Fill failed: ${error?.shortMessage || error?.message || "Unknown error"}`);
     }
-  };
+  }, [
+    address,
+    publicClient,
+    orderInfo.isActive,
+    orderInfo.takerToken,
+    order,
+    needsApproval,
+    seriesId,
+    writeContractAsync,
+    addNotice,
+    onFilled,
+  ]);
 
   return (
     <div className="p-4 border rounded-lg space-y-3 bg-gradient-to-r from-secondary-50 to-primary-50">
       <div className="flex justify-between items-start">
         <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-lg">{optionsAmountDisplay} Call Options</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-lg">{orderInfo.optionsAmountDisplay} Call Options</span>
             <Chip size="sm" color="secondary" variant="flat">
-              Series {info.seriesId}
+              Series {orderInfo.shortSeriesId}
             </Chip>
             <Chip size="sm" color="primary" variant="flat">
-              {info.takerToken}
+              {orderInfo.takerToken}
             </Chip>
             {order.cancelled && (
               <Chip size="sm" color="danger" variant="flat">
@@ -236,7 +305,7 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
                 Filled
               </Chip>
             )}
-            {!info.isActive && (
+            {!orderInfo.isActive && (
               <Chip size="sm" color="warning" variant="flat">
                 Inactive
               </Chip>
@@ -245,10 +314,10 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
 
           <div className="text-sm text-default-600 space-y-1">
             <div className="font-medium">
-              Price: {info.pricePerOption} {info.takerToken} per option
+              Price: {orderInfo.pricePerOption} {orderInfo.takerToken} per option
             </div>
             <div>
-              Total Cost: {info.totalPrice} {info.takerToken}
+              Total Cost: {orderInfo.totalPrice} {orderInfo.takerToken}
             </div>
             <div className="flex items-center gap-1 text-xs">
               <Info tip="These are ERC-1155 call option tokens that can be exercised if profitable" />
@@ -258,17 +327,21 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
         </div>
 
         <div className="text-right text-xs text-default-500 space-y-1">
-          <div>Expires: {info.expiry.toLocaleString()}</div>
+          <div>Expires: {orderInfo.expiry.toLocaleString()}</div>
           <div>Maker: {order.maker.slice(0, 8)}…</div>
-          {info.allowsPartial && <div className="text-success">Partial fills allowed</div>}
-          <div className="text-secondary font-medium">Series ID: {info.seriesId}</div>
+          {orderInfo.allowsPartial && <div className="text-success">Partial fills allowed</div>}
+          <div className="text-secondary font-medium">
+            <Tooltip content={`Full Series ID: ${orderInfo.seriesId}`} placement="left">
+              <span className="cursor-help">Series: {orderInfo.shortSeriesId}</span>
+            </Tooltip>
+          </div>
         </div>
       </div>
 
       {/* Fill Controls */}
-      {!order.filled && !order.cancelled && info.isActive && isConnected && (
-        <div className="flex gap-2 items-end">
-          {info.allowsPartial && (
+      {!order.filled && !order.cancelled && orderInfo.isActive && isConnected && (
+        <div className="flex gap-2 items-end flex-wrap">
+          {orderInfo.allowsPartial && (
             <Input
               type="number"
               label="Fill %"
@@ -278,33 +351,30 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
               className="w-32"
               min="1"
               max="100"
+              size="sm"
             />
           )}
 
           <div className="flex gap-2">
-            <Button size="sm" color="primary" onPress={() => fillOrder(parsedFillPercent)}>
-              Buy Options
+            <Button 
+              size="sm" 
+              color="primary" 
+              onPress={() => fillOrder(parsedFillPercent)}
+              isLoading={isPending}
+              isDisabled={isPending}
+            >
+              {isPending ? "Processing..." : "Buy Options"}
             </Button>
 
             {needsApproval && (
               <Button
                 size="sm"
                 variant="flat"
-                onPress={async () => {
-                  try {
-                    await writeContractAsync({
-                      address: order.takerAsset as ViemAddress,
-                      abi: erc20Abi,
-                      functionName: "approve",
-                      args: [LOP_V4_ADDRESS as ViemAddress, 2n ** 256n - 1n],
-                    });
-                    addNotice(`✅ ${takerToken} approved`);
-                  } catch (e: any) {
-                    addNotice(`❌ Approval failed: ${e.message}`);
-                  }
-                }}
+                onPress={handleApproval}
+                isLoading={isPending}
+                isDisabled={isPending}
               >
-                Approve {takerToken}
+                Approve {orderInfo.takerToken}
               </Button>
             )}
           </div>
@@ -327,13 +397,13 @@ function OrderRow({ order, fillPercent, onChangeFill, onFilled, addNotice }: Ord
             <strong>Payment Token:</strong> {order.takerAsset}
           </div>
           <div>
-            <strong>Options Amount:</strong> {optionsAmountDisplay}
+            <strong>Options Amount:</strong> {orderInfo.optionsAmountDisplay}
           </div>
           <div>
-            <strong>Payment Required:</strong> {formatUnits(BigInt(order.takingAmount), decimals)}
+            <strong>Payment Required:</strong> {orderInfo.totalPrice} {orderInfo.takerToken}
           </div>
           <div>
-            <strong>Series ID:</strong> {info.seriesId}
+            <strong>Series ID:</strong> {orderInfo.seriesId}
           </div>
           <div>
             <strong>Maker Traits:</strong> {order.order.makerTraits}
@@ -359,106 +429,144 @@ export default function Orderbook() {
   const [selectedToken, setSelectedToken] = useState<string>("all");
   const [fillPercents, setFillPercents] = useState<Record<string, string>>({});
 
-  const addNotice = (msg: string) => {
-    setNotices((n) => [...n, msg]);
-    setTimeout(() => setNotices((prev) => prev.filter((notice) => notice !== msg)), 10000);
-  };
+  const addNotice = useCallback((msg: string) => {
+    const id = Date.now().toString();
+    setNotices((n) => [...n, `${id}:${msg}`]);
+    
+    // Auto-clear after 10 seconds
+    setTimeout(() => {
+      setNotices((prev) => prev.filter((notice) => !notice.startsWith(`${id}:`)));
+    }, 10000);
+  }, []);
 
-  const loadOrders = async () => {
+  const loadOrders = useCallback(async () => {
     setLoading(true);
     try {
       const params: OrderFilters = {
         ...filters,
-        makerAsset: ERC1155_PROXY_ADDRESS, // fixed: was CALLTOKEN_ADDRESS
+        makerAsset: ERC1155_PROXY_ADDRESS, // Use the transfer proxy address
         takerAsset:
           selectedToken === "all"
             ? undefined
             : TOKEN_ADDRESSES[selectedToken as keyof typeof TOKEN_ADDRESSES],
       };
       const { orders: fetched } = await fetchOrders(params);
+      
       // only keep orders with valid extension (i.e., ERC-1155 series)
       const filtered = fetched.filter((o) => {
         const { hasExtension } = parseERC1155Extension(o.extension);
         return hasExtension;
       });
+      
       setOrders(filtered);
-    } catch (e: any) {
+    } catch (error: any) {
+      console.error("Failed to load orders:", error);
+      addNotice(`❌ Failed to load orders: ${error?.message || "Unknown error"}`);
     } finally {
       setLoading(false);
     }
-  };
+  }, [filters, selectedToken, addNotice]);
 
   useEffect(() => {
     loadOrders();
     const id = setInterval(loadOrders, 30000);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedToken, filters.active]);
+  }, [loadOrders]);
 
-  const handleFillChange = (hash: string, val: string) => {
+  const handleFillChange = useCallback((hash: string, val: string) => {
     setFillPercents((prev) => ({ ...prev, [hash]: val }));
-  };
+  }, []);
 
-  const handleOrderFilled = () => {
+  const handleOrderFilled = useCallback(() => {
     loadOrders();
     addNotice("📈 Options purchased successfully! Refreshing orderbook...");
-  };
+  }, [loadOrders, addNotice]);
+
+  const toggleActiveFilter = useCallback(() => {
+    setFilters((f) => ({ ...f, active: !f.active }));
+  }, []);
+
+  const handleTokenSelection = useCallback((keys: any) => {
+    const selectedKey = [...keys][0] as string;
+    setSelectedToken(selectedKey);
+  }, []);
+
+  const displayNotices = useMemo(() => 
+    notices.map(notice => notice.split(':').slice(1).join(':')), 
+    [notices]
+  );
 
   return (
-    <Card className="p-5 space-y-4">
+    <Card className="p-6 space-y-6 max-w-6xl mx-auto">
       <div className="flex justify-between items-center">
         <div>
-          <h3 className="text-lg font-medium">Call Options Orderbook</h3>
-          <p className="text-sm text-default-500">
+          <h3 className="text-xl font-semibold">Call Options Orderbook</h3>
+          <p className="text-sm text-default-600">
             Buy ERC-1155 call options with your preferred payment token
           </p>
         </div>
         <Button size="sm" onPress={loadOrders} isLoading={loading}>
-          Refresh
+          {loading ? "Loading..." : "Refresh"}
         </Button>
       </div>
 
       {/* Notices */}
-      {notices.map((n, i) => (
-        <div
-          key={i}
-          className="p-3 text-sm border rounded-lg bg-warning-50 border-warning-200 text-warning-800"
-        >
-          {n}
+      {displayNotices.length > 0 && (
+        <div className="space-y-2">
+          {displayNotices.map((notice, i) => (
+            <div
+              key={`${i}-${notice.slice(0, 20)}`}
+              className="p-3 text-sm border rounded-lg bg-amber-50 border-amber-200 text-amber-800"
+            >
+              {notice}
+            </div>
+          ))}
         </div>
-      ))}
+      )}
 
       {/* Filters */}
-      <div className="flex gap-3 items-end">
-        <Select
-          label="Payment Token"
-          selectedKeys={new Set([selectedToken])}
-          onSelectionChange={(keys) => setSelectedToken([...keys][0] as string)}
-          className="max-w-xs"
-        >
-          <SelectItem key="all" value="all">
-            All Payment Tokens
-          </SelectItem>
-          {Object.keys(DECIMALS).map((sym) => (
-            <SelectItem key={sym} value={sym}>
-              {sym}
+      <div className="flex gap-3 items-end flex-wrap">
+        <div className="max-w-xs">
+          <Select
+            label="Payment Token"
+            selectedKeys={new Set([selectedToken])}
+            onSelectionChange={handleTokenSelection}
+            size="sm"
+          >
+            <SelectItem key="all" textValue="All Payment Tokens">
+              All Payment Tokens
             </SelectItem>
-          ))}
-        </Select>
+            {Object.keys(DECIMALS).map((sym) => (
+              <SelectItem key={sym} textValue={sym}>
+                {sym}
+              </SelectItem>
+            ))}
+          </Select>
+        </div>
 
         <Button
           size="sm"
           variant={filters.active ? "solid" : "flat"}
           color={filters.active ? "primary" : "default"}
-          onPress={() => setFilters((f) => ({ ...f, active: !f.active }))}
+          onPress={toggleActiveFilter}
         >
           {filters.active ? "Active Orders" : "All Orders"}
         </Button>
 
-        <div className="text-xs text-default-500">
-          {orders.length} call option orders available
+        <div className="text-xs text-default-500 flex items-center gap-2">
+          <Chip size="sm" variant="flat">
+            {orders.length} orders
+          </Chip>
+          <span>call option orders available</span>
         </div>
       </div>
+
+      {/* Connection Status */}
+      {!isConnected && (
+        <div className="text-sm text-yellow-600 bg-yellow-50 p-3 rounded border border-yellow-200">
+          💡 Connect your wallet to buy options
+        </div>
+      )}
 
       {/* Orders List */}
       {loading ? (
@@ -469,7 +577,12 @@ export default function Orderbook() {
       ) : orders.length === 0 ? (
         <div className="text-center p-8 text-default-500">
           <div className="mb-2">No call option orders found</div>
-          <div className="text-sm">Try adjusting your payment token filter or check back later</div>
+          <div className="text-sm">
+            {selectedToken === "all" 
+              ? "Try adjusting your filters or check back later" 
+              : `No orders found for ${selectedToken}. Try selecting "All Payment Tokens"`
+            }
+          </div>
         </div>
       ) : (
         <div className="space-y-4">
@@ -478,6 +591,11 @@ export default function Orderbook() {
             <Chip size="sm" color="secondary" variant="flat">
               {orders.length} orders
             </Chip>
+            {selectedToken !== "all" && (
+              <Chip size="sm" color="primary" variant="flat">
+                {selectedToken} only
+              </Chip>
+            )}
           </div>
 
           {orders.map((order) => (

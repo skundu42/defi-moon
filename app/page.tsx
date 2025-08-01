@@ -347,40 +347,6 @@ export default function MainPage() {
           ))}
         </Accordion>
       </section>
-
-      {/* Call to Action */}
-      <section className="text-center space-y-6">
-        <Card className="bg-gradient-to-r from-primary-50 to-secondary-50 p-8">
-          <div className="space-y-4">
-            <h2 className="text-2xl font-bold">Ready to Get Started?</h2>
-            <p className="text-default-600 max-w-2xl mx-auto">
-              Join the future of decentralized options trading. Start with small amounts 
-              to familiarize yourself with the platform.
-            </p>
-            <div className="flex flex-col sm:flex-row gap-4 justify-center pt-2">
-              <Button
-                as={Link}
-                href="/"
-                color="primary"
-                size="lg"
-                className="font-semibold"
-                startContent={<span>🎯</span>}
-              >
-                Start Trading Options
-              </Button>
-              <Button
-                as={Link}
-                href="/taker"
-                variant="bordered"
-                size="lg"
-                className="font-semibold"
-              >
-                Browse Available Options
-              </Button>
-            </div>
-          </div>
-        </Card>
-      </section>
     </section>
   );
 }

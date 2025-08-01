@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useMemo } from "react";
 import clsx from "clsx";
 import NextLink from "next/link";
 import { usePathname } from "next/navigation";
@@ -29,14 +29,25 @@ const navLinks: Array<{ label: string; href: string }> = [
 ];
 
 export const Navbar = () => {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "/";
   const appName = siteConfig?.name ?? "YourApp";
-  const githubHref = siteConfig?.links?.github ?? "#";
+  
+  // Safe access to github link with fallback
+  const githubHref = (() => {
+    try {
+      return (siteConfig as any)?.links?.github ?? "https://github.com";
+    } catch {
+      return "https://github.com";
+    }
+  })();
 
-  const isActive = (href: string) =>
-    href === "/"
-      ? pathname === "/"
-      : pathname === href || pathname?.startsWith(href + "/");
+  const isActive = useMemo(
+    () => (href: string) =>
+      href === "/"
+        ? pathname === "/"
+        : pathname === href || pathname?.startsWith(href + "/"),
+    [pathname]
+  );
 
   return (
     <HeroUINavbar
@@ -52,16 +63,15 @@ export const Navbar = () => {
         <NavbarBrand as="li" className="max-w-fit">
           <NextLink href="/" className="flex items-center gap-2">
             {/* Replace with your logo component if desired */}
-            <span className="text-base font-semibold tracking-tight">{appName}</span>
+            <span className="text-base font-semibold tracking-tight text-foreground">
+              {appName}
+            </span>
           </NextLink>
         </NavbarBrand>
       </NavbarContent>
 
       {/* Center: Primary nav (desktop) */}
-      <NavbarContent
-        justify="center"
-        className="hidden md:flex gap-6"
-      >
+      <NavbarContent justify="center" className="hidden md:flex gap-6">
         <ul className="flex items-center gap-6">
           {navLinks.map(({ label, href }) => {
             const active = isActive(href);
@@ -71,7 +81,7 @@ export const Navbar = () => {
                   href={href}
                   aria-current={active ? "page" : undefined}
                   className={clsx(
-                    "relative text-sm transition-colors",
+                    "relative text-sm transition-colors duration-200",
                     active
                       ? "text-foreground font-medium"
                       : "text-default-600 hover:text-foreground"
@@ -81,7 +91,7 @@ export const Navbar = () => {
                   {/* underline indicator for active */}
                   <span
                     className={clsx(
-                      "absolute -bottom-1 left-0 h-[2px] w-full rounded-full transition-opacity",
+                      "absolute -bottom-1 left-0 h-[2px] w-full rounded-full transition-opacity duration-200",
                       active ? "opacity-100 bg-primary" : "opacity-0"
                     )}
                   />
@@ -99,36 +109,47 @@ export const Navbar = () => {
             isExternal
             aria-label="GitHub repository"
             href={githubHref}
-            className="flex items-center"
+            className="flex items-center p-2 rounded-md hover:bg-default-100 transition-colors"
           >
-            <GithubIcon className="text-default-500 hover:text-foreground transition-colors" />
+            <GithubIcon className="text-default-500 hover:text-foreground transition-colors w-5 h-5" />
           </Link>
         </NavbarItem>
         <NavbarItem>
-          <ConnectButton
-            showBalance={false}
-            chainStatus="none"
-            accountStatus="address"
-          />
+          <div className="flex items-center">
+            <ConnectButton
+              showBalance={false}
+              chainStatus="none"
+              accountStatus="address"
+            />
+          </div>
         </NavbarItem>
       </NavbarContent>
 
       {/* Right: Mobile (burger + GitHub + Connect) */}
       <NavbarContent className="md:hidden" justify="end">
-        <Link
-          isExternal
-          aria-label="GitHub repository"
-          href={githubHref}
-          className="flex items-center mr-1"
-        >
-          <GithubIcon className="text-default-500" />
-        </Link>
-        <ConnectButton
-          showBalance={false}
-          chainStatus="icon"
-          accountStatus="avatar"
+        <NavbarItem>
+          <Link
+            isExternal
+            aria-label="GitHub repository"
+            href={githubHref}
+            className="flex items-center p-2 rounded-md hover:bg-default-100 transition-colors mr-1"
+          >
+            <GithubIcon className="text-default-500 w-5 h-5" />
+          </Link>
+        </NavbarItem>
+        <NavbarItem>
+          <div className="flex items-center">
+            <ConnectButton
+              showBalance={false}
+              chainStatus="icon"
+              accountStatus="avatar"
+            />
+          </div>
+        </NavbarItem>
+        <NavbarMenuToggle 
+          aria-label="Toggle navigation menu" 
+          className="ml-2"
         />
-        <NavbarMenuToggle />
       </NavbarContent>
 
       {/* Mobile Menu */}
@@ -143,8 +164,10 @@ export const Navbar = () => {
                   href={href}
                   size="lg"
                   className={clsx(
-                    "block py-2",
-                    active ? "text-primary font-medium" : "text-foreground"
+                    "block py-3 px-2 rounded-md transition-colors",
+                    active 
+                      ? "text-primary font-medium bg-primary/10" 
+                      : "text-foreground hover:bg-default-100"
                   )}
                 >
                   {label}

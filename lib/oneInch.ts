@@ -106,7 +106,7 @@ export function buildLimitOrder1155(params: {
     salt: nonce,
     maker: makerAddress,
     receiver: makerAddress, // receiver is typically same as maker
-    makerAsset: "0x03F916C97e7DF446aB916776313299C13b533f91" as Address, // ERC1155_PROXY_ADDRESS
+    makerAsset: "0x639e4E6cFF7d9a9bcFCa09ac8282CF037D40f9Fd" as Address, // ERC1155_PROXY_ADDRESS
     takerAsset: takerAsset,
     makingAmount: maker1155.amount,
     takingAmount: takerAmount,

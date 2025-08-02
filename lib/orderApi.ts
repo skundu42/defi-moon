@@ -64,11 +64,9 @@ const API_BASE = "/api/orders";
 export async function submitOrder(
   order: any,
   signature: string,
-  orderHash: string
+  orderHash: string,
+  extension?: string
 ): Promise<void> {
-  // Extract extension from order if it exists
-  const extension = order.extension || "0x";
-  
   // Create clean order object without extension
   const cleanOrder = {
     salt: order.salt.toString(),
@@ -84,12 +82,16 @@ export async function submitOrder(
   const orderData = {
     order: cleanOrder,
     signature,
-    extension, // Pass extension separately
+    extension: extension || "0x", // Ensure extension is passed
     orderHash,
   };
 
   try {
-    console.log("Submitting order with data:", orderData);
+    console.log("🔍 Submitting order with data:", {
+      ...orderData,
+      extensionLength: orderData.extension?.length || 0,
+      signatureLength: orderData.signature?.length || 0,
+    });
     
     const response = await fetch(API_BASE, {
       method: "POST",
@@ -160,6 +162,12 @@ export async function fetchOrders(filters: OrderFilters = {}): Promise<{ orders:
     }));
 
     console.log(`Fetched ${orders.length} orders from local API`);
+    
+    // Log extension data for debugging
+    orders.forEach(order => {
+      console.log(`Order ${order.orderHash.slice(0, 8)}: extension length = ${order.extension?.length || 0}`);
+    });
+    
     return { orders };
   } catch (error) {
     console.error("Failed to fetch orders from local API:", error);

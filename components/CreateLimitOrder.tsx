@@ -27,6 +27,8 @@ import {
   LOP_V4_ADDRESS,
   lopV4Abi,
   isOrderActive,
+  getOrderHash,
+  hasExtension,
 } from "@/lib/oneInch";
 import {
   VAULT_ADDRESS,
@@ -305,9 +307,9 @@ export default function CreateLimitOrder() {
 
     setSubmitting(true);
     try {
-      addNotice("🔄 Creating and signing order...");
+      addNotice("🔄 Creating and signing ERC-1155 order...");
       
-      console.log("🔍 Creating order with params:", {
+      console.log("🔍 Creating ERC-1155 order with params:", {
         makerAddress: address,
         maker1155: {
           token: CALLTOKEN_ADDRESS,
@@ -318,7 +320,7 @@ export default function CreateLimitOrder() {
         takerAsset,
         takerAmount: takerAmt,
         expirationSec: 7 * 24 * 60 * 60, // 7 days
-        allowPartialFill: true,
+        allowPartialFill: false,
       });
 
       const { order, typedData, orderHash, extension } = buildLimitOrder1155({
@@ -332,28 +334,61 @@ export default function CreateLimitOrder() {
         takerAsset,
         takerAmount: takerAmt,
         expirationSec: 7 * 24 * 60 * 60, // 7 days
-        allowPartialFill: true,
+        allowPartialFill: false,
       });
 
-      console.log("🔍 Order created:", {
-        order,
+      // CRITICAL: Validate the order has proper 1inch flags
+      const orderHasExtension = hasExtension(order.makerTraits);
+      const makerAssetIsProxy = order.makerAsset.toLowerCase() === ERC1155_TRANSFER_PROXY_ADDRESS.toLowerCase();
+
+      console.log("🔍 Order validation:", {
         orderHash,
         extension,
-        calculatedHash: orderHash,
-        orderForHashing: {
-          salt: order.salt.toString(),
-          maker: order.maker,
-          receiver: order.receiver,
-          makerAsset: order.makerAsset,
-          takerAsset: order.takerAsset,
-          makingAmount: order.makingAmount.toString(),
-          takingAmount: order.takingAmount.toString(),
-          makerTraits: order.makerTraits.toString(),
-        },
-        typedDataDomain: typedData.domain,
+        extensionLength: extension.length,
+        orderHasExtension,
+        makerAssetIsProxy,
+        makerAsset: order.makerAsset,
+        expectedProxy: ERC1155_TRANSFER_PROXY_ADDRESS,
+        makerTraits: order.makerTraits.toString(),
+        makerTraitsHex: "0x" + order.makerTraits.toString(16),
+        salt: order.salt.toString(),
+        allValid: orderHasExtension && makerAssetIsProxy && extension.length >= 130,
       });
 
-      addNotice("✍️ Please sign the order in your wallet...");
+      if (!orderHasExtension) {
+        console.error("❌ Order missing HAS_EXTENSION flag");
+        return addNotice("❌ Order missing HAS_EXTENSION flag - check buildLimitOrder1155");
+      }
+
+      if (!makerAssetIsProxy) {
+        console.error("❌ Order makerAsset is not the proxy");
+        return addNotice("❌ Order makerAsset is not the ERC1155 proxy");
+      }
+
+      if (!extension || extension === "0x" || extension.length < 130) {
+        console.error("❌ Invalid extension generated:", {
+          extension,
+          length: extension?.length || 0,
+          expected: ">=130 chars for 1inch ERC-1155 data"
+        });
+        return addNotice(`❌ Invalid extension generated: ${extension} (length: ${extension?.length || 0})`);
+      }
+
+      // Hash verification
+      const calculatedHashCheck = getOrderHash(order);
+      
+      console.log("🔍 Order hash verification:", {
+        provided: orderHash,
+        calculated: calculatedHashCheck,
+        match: orderHash === calculatedHashCheck,
+      });
+
+      if (orderHash !== calculatedHashCheck) {
+        console.error("❌ Order hash mismatch detected!");
+        return addNotice("❌ Order hash calculation mismatch - check implementation");
+      }
+
+      addNotice("✍️ Please sign the ERC-1155 order in your wallet...");
 
       const signature = await signTypedDataAsync({
         domain: typedData.domain,
@@ -362,9 +397,17 @@ export default function CreateLimitOrder() {
         message: typedData.message,
       });
 
-      console.log("🔍 Order signed:", { signature });
+      console.log("🔍 Order signed successfully:", { 
+        signature,
+        signatureLength: signature.length,
+      });
 
-      addNotice("📤 Submitting order to API...");
+      // Validate signature format
+      if (!signature || signature.length !== 132) {
+        return addNotice("❌ Invalid signature format received from wallet");
+      }
+
+      addNotice("📤 Submitting ERC-1155 order to API...");
 
       // Create the exact order structure that the API expects
       const orderForApi = {
@@ -376,15 +419,15 @@ export default function CreateLimitOrder() {
         makingAmount: order.makingAmount.toString(),
         takingAmount: order.takingAmount.toString(),
         makerTraits: order.makerTraits.toString(),
-        extension: extension, // Include extension in the order object
       };
 
-      console.log("🔍 Submitting to API:", {
+      console.log("🔍 Final API submission:", {
         orderForApi,
         signature,
         orderHash,
         extension,
-        submitData: {
+        extensionLength: extension.length,
+        apiData: {
           order: orderForApi,
           signature,
           extension,
@@ -393,7 +436,7 @@ export default function CreateLimitOrder() {
       });
 
       // Submit to API with proper structure
-      await submitOrder(orderForApi, signature, orderHash);
+      await submitOrder(orderForApi, signature, orderHash, extension);
 
       const createdOrder: CreatedOrder = {
         hash: orderHash,
@@ -410,9 +453,9 @@ export default function CreateLimitOrder() {
       setOrderHash(orderHash);
       setCreatedOrders((prev) => [createdOrder, ...prev]);
 
-      addNotice(`🎉 Order created successfully!`);
+      addNotice(`🎉 ERC-1155 order created successfully!`);
       addNotice(`📋 Order hash: ${orderHash.slice(0, 16)}...`);
-      addNotice(`📈 Selling ${qty.toString()} options for ${formatUnits(takerAmt, decimals)} ${takerSym}`);
+      addNotice(`📈 Selling ${qty.toString()} ERC-1155 options for ${formatUnits(takerAmt, decimals)} ${takerSym}`);
 
       // Reset form
       setQtyStr("");
@@ -425,7 +468,7 @@ export default function CreateLimitOrder() {
         })
       );
     } catch (error: any) {
-      console.error("Order creation error:", error);
+      console.error("ERC-1155 order creation error:", error);
       addNotice(`❌ Order creation failed: ${error?.message || String(error)}`);
     } finally {
       setSubmitting(false);
@@ -492,7 +535,7 @@ export default function CreateLimitOrder() {
           ERC-1155 Options Limit Orders
         </h3>
         <p className="text-sm text-default-600">
-          Create limit orders to sell your option tokens using 1inch Protocol v4
+          Create 1inch-compatible limit orders to sell your ERC-1155 option tokens
         </p>
       </div>
 
@@ -621,7 +664,7 @@ export default function CreateLimitOrder() {
 
       {/* Order Creation Form */}
       <div className="space-y-4">
-        <h4 className="font-medium text-sm">Step 2: Create Limit Order</h4>
+        <h4 className="font-medium text-sm">Step 2: Create ERC-1155 Limit Order</h4>
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="space-y-2">
@@ -639,7 +682,7 @@ export default function CreateLimitOrder() {
               }}
             />
             <div className="text-xs text-default-500">
-              How many option tokens you want to sell
+              How many ERC-1155 option tokens you want to sell
             </div>
           </div>
 
@@ -705,14 +748,14 @@ export default function CreateLimitOrder() {
           }
           className="w-full h-14"
         >
-          {submitting ? "Creating Order..." : "Create & Sign Limit Order"}
+          {submitting ? "Creating ERC-1155 Order..." : "Create & Sign ERC-1155 Limit Order"}
         </Button>
       </div>
 
       {/* Created Orders */}
       {createdOrders.length > 0 && (
         <div className="space-y-4">
-          <h4 className="font-medium">Your Active Orders ({createdOrders.length})</h4>
+          <h4 className="font-medium">Your Active ERC-1155 Orders ({createdOrders.length})</h4>
           <div className="space-y-3">
             {createdOrders.map((orderData) => (
               <div
@@ -722,13 +765,19 @@ export default function CreateLimitOrder() {
                 <div className="flex justify-between items-start">
                   <div className="space-y-1 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">Order #{orderData.hash.slice(0, 8)}...</span>
+                      <span className="text-sm font-medium">ERC-1155 Order #{orderData.hash.slice(0, 8)}...</span>
                       <span className="px-2 py-1 text-xs bg-green-100 text-green-800 rounded-full">
                         Active
+                      </span>
+                      <span className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">
+                        1inch Compatible
                       </span>
                     </div>
                     <div className="text-xs text-default-500">
                       Created: {new Date(orderData.timestamp).toLocaleString()}
+                    </div>
+                    <div className="text-xs text-default-500">
+                      Extension: {orderData.extension.length} chars • HAS_EXTENSION: ✅
                     </div>
                   </div>
                   <Button
@@ -744,7 +793,7 @@ export default function CreateLimitOrder() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                   <div>
                     <div className="text-xs text-default-500">Selling</div>
-                    <div className="font-medium">{orderData.amount.toString()} options</div>
+                    <div className="font-medium">{orderData.amount.toString()} ERC-1155 options</div>
                   </div>
                   <div>
                     <div className="text-xs text-default-500">Series ID</div>
@@ -774,16 +823,18 @@ export default function CreateLimitOrder() {
                   <div className="mt-3 p-3 bg-default-100 rounded text-xs space-y-2 font-mono">
                     <div className="grid grid-cols-1 gap-1">
                       <div><span className="text-default-600">Order Hash:</span> {orderData.hash}</div>
-                      <div><span className="text-default-600">Maker Asset:</span> {orderData.order.makerAsset}</div>
+                      <div><span className="text-default-600">Maker Asset (Proxy):</span> {orderData.order.makerAsset}</div>
                       <div><span className="text-default-600">Taker Asset:</span> {orderData.order.takerAsset}</div>
                       <div><span className="text-default-600">Making Amount:</span> {orderData.order.makingAmount.toString()}</div>
                       <div><span className="text-default-600">Taking Amount:</span> {orderData.order.takingAmount.toString()}</div>
                       <div><span className="text-default-600">Salt:</span> {orderData.order.salt.toString()}</div>
-                      <div><span className="text-default-600">Extension:</span> {orderData.extension}</div>
+                      <div><span className="text-default-600">MakerTraits:</span> {orderData.order.makerTraits.toString()}</div>
+                      <div><span className="text-default-600">Extension Length:</span> {orderData.extension.length} chars</div>
+                      <div><span className="text-default-600">Extension (first 50):</span> {orderData.extension.slice(0, 50)}...</div>
                     </div>
                     <div className="text-xs text-default-600 bg-default-50 p-2 rounded mt-2 font-sans">
-                      💡 This order is live on 1inch Protocol v4 and can be filled by any taker. 
-                      The ERC1155TransferProxy handles the conversion between ERC20-style transfers and ERC1155 token movements.
+                      💡 This ERC-1155 order is fully compatible with 1inch Protocol v4. It includes the HAS_EXTENSION flag, 
+                      proper extension data for your proxy contract, and extension hash validation in the salt field.
                     </div>
                   </div>
                 </details>
@@ -815,14 +866,15 @@ export default function CreateLimitOrder() {
       {/* Help Section */}
       <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
         <h5 className="font-medium text-blue-900 mb-2">
-          How ERC-1155 Limit Orders Work:
+          How ERC-1155 Limit Orders Work with 1inch:
         </h5>
         <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
-          <li>Your ERC-1155 option tokens are listed for sale via the 1inch Protocol</li>
-          <li>The ERC1155TransferProxy enables ERC-20 style trading of ERC-1155 tokens</li>
-          <li>Orders are signed off-chain and stored in the local orderbook</li>
-          <li>Any wallet can discover and fill your orders by paying the specified price</li>
-          <li>Partial fills are supported - buyers can purchase any amount up to your total</li>
+          <li>Orders use your ERC1155TransferProxy as the makerAsset address</li>
+          <li>Extension data contains the actual ERC-1155 token address, tokenId, and transfer data</li>
+          <li>HAS_EXTENSION flag (bit 255) is set in makerTraits to enable extension processing</li>
+          <li>Extension hash is included in the order salt for validation</li>
+          <li>When filled, 1inch calls your proxy which converts ERC20→ERC1155 transfers</li>
+          <li>Orders must be filled completely (no partial fills) for simplicity</li>
           <li>Orders expire automatically after 7 days or can be cancelled manually</li>
         </ul>
       </div>

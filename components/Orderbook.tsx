@@ -16,7 +16,6 @@ import {
   getExpiration,
   allowsPartialFill,
   isOrderActive,
-  lopV4Abi,
   hasExtension,
 } from "@/lib/oneInch";
 import {
@@ -24,6 +23,7 @@ import {
   erc20Abi,
   CALLTOKEN_ADDRESS,
   ERC1155_PROXY_ADDRESS,
+  lopV4Abi,
   erc1155Abi,
 } from "@/lib/contracts";
 import { fetchOrders, markOrderFilled, ApiOrder, OrderFilters } from "@/lib/orderApi";

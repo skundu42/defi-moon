@@ -25,13 +25,13 @@ import { Spinner } from "@heroui/spinner";
 import {
   buildLimitOrder1155,
   LOP_V4_ADDRESS,
-  lopV4Abi,
   isOrderActive,
   getOrderHash,
   hasExtension,
 } from "@/lib/oneInch";
 import {
   VAULT_ADDRESS,
+  lopV4Abi,
   CALLTOKEN_ADDRESS,
   TOKEN_ADDRESSES,
   vaultAbi,
@@ -862,22 +862,6 @@ export default function CreateLimitOrder() {
           </div>
         </details>
       )}
-
-      {/* Help Section */}
-      <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
-        <h5 className="font-medium text-blue-900 mb-2">
-          How ERC-1155 Limit Orders Work with 1inch:
-        </h5>
-        <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
-          <li>Orders use your ERC1155TransferProxy as the makerAsset address</li>
-          <li>Extension data contains the actual ERC-1155 token address, tokenId, and transfer data</li>
-          <li>HAS_EXTENSION flag (bit 255) is set in makerTraits to enable extension processing</li>
-          <li>Extension hash is included in the order salt for validation</li>
-          <li>When filled, 1inch calls your proxy which converts ERC20→ERC1155 transfers</li>
-          <li>Orders must be filled completely (no partial fills) for simplicity</li>
-          <li>Orders expire automatically after 7 days or can be cancelled manually</li>
-        </ul>
-      </div>
     </Card>
   );
 }

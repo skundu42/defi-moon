@@ -1,3 +1,4 @@
+
 // app/api/orders/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { keccak256, encodeAbiParameters } from "viem";
@@ -12,10 +13,10 @@ if (!global.ordersStorage) {
   global.ordersStorage = new Map<string, any>();
 }
 
-// Helper function to calculate order hash - MUST match the client-side calculation
+// Helper function to calculate order hash - MUST match the client-side calculation exactly
 function calculateOrderHash(order: any): string {
   try {
-    // Ensure all values are exactly the same type as client calculation
+    // Use EXACT same encoding as client-side oneInch.ts
     const encoded = encodeAbiParameters(
       [
         { name: "salt", type: "uint256" },
@@ -52,7 +53,6 @@ function calculateOrderHash(order: any): string {
         takingAmount: order.takingAmount.toString(),
         makerTraits: order.makerTraits.toString(),
       },
-      encoded,
       hash,
     });
     
@@ -69,7 +69,7 @@ function validateOrder(order: any): { isValid: boolean; error?: string } {
     // Check required fields
     const requiredFields = ['salt', 'maker', 'receiver', 'makerAsset', 'takerAsset', 'makingAmount', 'takingAmount', 'makerTraits'];
     for (const field of requiredFields) {
-      if (!order[field]) {
+      if (order[field] === undefined || order[field] === null || order[field] === '') {
         return { isValid: false, error: `Missing required field: ${field}` };
       }
     }
@@ -87,7 +87,10 @@ function validateOrder(order: any): { isValid: boolean; error?: string } {
     const numericFields = ['salt', 'makingAmount', 'takingAmount', 'makerTraits'];
     for (const field of numericFields) {
       try {
-        BigInt(order[field]);
+        const val = BigInt(order[field]);
+        if (val < 0n) {
+          return { isValid: false, error: `${field} cannot be negative` };
+        }
       } catch {
         return { isValid: false, error: `Invalid numeric format for ${field}: ${order[field]}` };
       }
@@ -99,6 +102,20 @@ function validateOrder(order: any): { isValid: boolean; error?: string } {
     }
     if (BigInt(order.takingAmount) <= 0n) {
       return { isValid: false, error: 'takingAmount must be positive' };
+    }
+
+    // Validate ERC1155 proxy address (case-insensitive)
+    const expectedProxy = "0x5EaF7a20901e87FD60E4414E82C1c7e58903F713";
+    if (order.makerAsset.toLowerCase() !== expectedProxy.toLowerCase()) {
+      console.warn(`API: Order makerAsset ${order.makerAsset} is not the expected ERC1155 proxy ${expectedProxy}`);
+      // Don't reject, just warn - might be a different type of order
+    }
+
+    // Check HAS_EXTENSION flag (bit 255) for ERC1155 orders
+    const makerTraits = BigInt(order.makerTraits);
+    const hasExtensionFlag = (makerTraits & (1n << 255n)) !== 0n;
+    if (order.makerAsset.toLowerCase() === expectedProxy.toLowerCase() && !hasExtensionFlag) {
+      return { isValid: false, error: 'ERC1155 orders must have HAS_EXTENSION flag set in makerTraits' };
     }
 
     return { isValid: true };
@@ -121,20 +138,49 @@ function validateSignature(signature: string): { isValid: boolean; error?: strin
   if (signature.length !== 132) { // 0x + 130 hex chars = 132
     return { isValid: false, error: `Invalid signature length: ${signature.length}, expected 132` };
   }
+  
+  // Validate hex format
+  if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+    return { isValid: false, error: 'Signature contains invalid hex characters' };
+  }
+  
   return { isValid: true };
 }
 
-// Validate extension format for ERC-1155
-function validateExtension(extension: string): { isValid: boolean; error?: string } {
+// Validate extension format for ERC-1155 - more lenient validation
+function validateExtension(extension: string, order: any): { isValid: boolean; error?: string } {
+  // If not an ERC1155 order, extension can be empty
+  const expectedProxy = "0x5EaF7a20901e87FD60E4414E82C1c7e58903F713";
+  const isERC1155Order = order.makerAsset.toLowerCase() === expectedProxy.toLowerCase();
+  
+  if (!isERC1155Order) {
+    // For non-ERC1155 orders, extension can be empty or "0x"
+    return { isValid: true };
+  }
+  
+  // For ERC1155 orders, we need a proper extension
   if (!extension) {
     return { isValid: false, error: 'Extension is required for ERC-1155 orders' };
   }
+  
+  if (!extension.startsWith('0x')) {
+    return { isValid: false, error: 'Extension must start with 0x' };
+  }
+  
   if (extension === "0x") {
     return { isValid: false, error: 'Extension cannot be empty for ERC-1155 orders' };
   }
-  if (extension.length < 130) { // Minimum length for encoded ERC-1155 data
-    return { isValid: false, error: `Extension too short: ${extension.length}, expected at least 130` };
+  
+  // More lenient length check - must have at least offset table (32 bytes = 64 hex chars)
+  if (extension.length < 66) { // 0x + 64 hex chars minimum
+    return { isValid: false, error: `Extension too short: ${extension.length}, expected at least 66 characters` };
   }
+  
+  // Validate hex format
+  if (!/^0x[0-9a-fA-F]+$/.test(extension)) {
+    return { isValid: false, error: 'Extension contains invalid hex characters' };
+  }
+  
   return { isValid: true };
 }
 
@@ -153,37 +199,54 @@ export async function GET(request: NextRequest) {
     let filteredOrders = Array.from(orders.values());
 
     console.log(`API: GET request - total stored orders: ${orders.size}`);
+    console.log(`API: GET filters - maker: ${maker}, takerAsset: ${takerAsset}, makerAsset: ${makerAsset}, active: ${active}`);
 
     // Apply filters
     if (maker) {
+      const makerLower = maker.toLowerCase();
       filteredOrders = filteredOrders.filter(
-        (o) => o.order?.maker?.toLowerCase() === maker.toLowerCase()
+        (o) => o.order?.maker?.toLowerCase() === makerLower || o.maker?.toLowerCase() === makerLower
       );
+      console.log(`API: After maker filter: ${filteredOrders.length} orders`);
     }
 
     if (takerAsset) {
+      const takerAssetLower = takerAsset.toLowerCase();
       filteredOrders = filteredOrders.filter(
-        (o) => o.order?.takerAsset?.toLowerCase() === takerAsset.toLowerCase()
+        (o) => o.order?.takerAsset?.toLowerCase() === takerAssetLower || o.takerAsset?.toLowerCase() === takerAssetLower
       );
+      console.log(`API: After takerAsset filter: ${filteredOrders.length} orders`);
     }
 
     if (makerAsset) {
+      const makerAssetLower = makerAsset.toLowerCase();
       filteredOrders = filteredOrders.filter(
-        (o) => o.order?.makerAsset?.toLowerCase() === makerAsset.toLowerCase()
+        (o) => o.order?.makerAsset?.toLowerCase() === makerAssetLower || o.makerAsset?.toLowerCase() === makerAssetLower
       );
+      console.log(`API: After makerAsset filter: ${filteredOrders.length} orders`);
     }
 
     if (active) {
       const now = Math.floor(Date.now() / 1000);
       filteredOrders = filteredOrders.filter((o) => {
-        if (o.cancelled || o.filled) return false;
+        // Skip cancelled or filled orders
+        if (o.cancelled || o.filled) {
+          return false;
+        }
+        
         try {
-          const expiration = Number((BigInt(o.order.makerTraits) >> 210n) & ((1n << 40n) - 1n));
-          return expiration === 0 || expiration > now;
-        } catch {
+          // Check expiration from makerTraits
+          const makerTraits = BigInt(o.order?.makerTraits || o.makerTraits || "0");
+          const expiration = Number((makerTraits >> 210n) & ((1n << 40n) - 1n));
+          const isNotExpired = expiration === 0 || expiration > now;
+          
+          return isNotExpired;
+        } catch (error) {
+          console.warn(`API: Error checking expiration for order ${o.orderHash}:`, error);
           return false; // Skip invalid orders
         }
       });
+      console.log(`API: After active filter: ${filteredOrders.length} orders`);
     }
 
     // Sort by timestamp (newest first)
@@ -194,7 +257,7 @@ export async function GET(request: NextRequest) {
 
     // Log extension data for debugging
     paginatedOrders.forEach(order => {
-      console.log(`API: Order ${order.orderHash?.slice(0, 8)}: extension length = ${order.extension?.length || 0}`);
+      console.log(`API: Order ${order.orderHash?.slice(0, 8)}: extension length = ${order.extension?.length || 0}, makerAsset = ${order.order?.makerAsset || order.makerAsset}`);
     });
 
     console.log(`API: Found ${filteredOrders.length} orders, returning ${paginatedOrders.length}`);
@@ -223,6 +286,7 @@ export async function POST(request: NextRequest) {
     console.log("API: Received order submission:", { 
       orderHash, 
       maker: order?.maker,
+      makerAsset: order?.makerAsset,
       hasExtension: !!extension,
       extensionLength: extension?.length || 0,
       signatureLength: signature?.length || 0,
@@ -256,8 +320,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate extension for ERC-1155 orders
-    const extensionValidation = validateExtension(extension);
+    // Validate extension
+    const extensionValidation = validateExtension(extension, order);
     if (!extensionValidation.isValid) {
       console.error("API: Extension validation failed:", extensionValidation.error);
       return NextResponse.json(
@@ -266,7 +330,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Verify order hash matches
+    // Verify order hash matches our calculation
     const calculatedHash = calculateOrderHash(order);
     if (calculatedHash !== orderHash) {
       console.error("API: Order hash mismatch:", { 
@@ -293,13 +357,14 @@ export async function POST(request: NextRequest) {
 
     // Check if order already exists
     if (orders.has(orderHash)) {
+      console.warn(`API: Order ${orderHash} already exists`);
       return NextResponse.json(
         { error: "Order already exists" },
         { status: 409 }
       );
     }
 
-    // Store order with the exact structure expected by the API
+    // Store order with the exact structure expected by the components
     const orderData = {
       orderHash,
       order: {
@@ -319,14 +384,14 @@ export async function POST(request: NextRequest) {
       filled: false,
       fillTx: null,
       filledTakingAmount: null,
-      // Decode some useful fields for filtering
+      // Duplicate fields for easier filtering (components expect these)
       maker: order.maker,
       makerAsset: order.makerAsset,
       takerAsset: order.takerAsset,
       makingAmount: order.makingAmount,
       takingAmount: order.takingAmount,
-      // Store makerTraits for expiration checks
       makerTraits: order.makerTraits,
+      createdAt: Date.now(), // Alternative timestamp field
     };
 
     orders.set(orderHash, orderData);
@@ -337,8 +402,7 @@ export async function POST(request: NextRequest) {
       extension: orderData.extension,
       extensionLength: orderData.extension?.length || 0,
       makerAsset: orderData.order.makerAsset,
-      signature: orderData.signature,
-      signatureLength: orderData.signature?.length || 0,
+      hasExtensionFlag: (BigInt(orderData.order.makerTraits) & (1n << 255n)) !== 0n,
     });
 
     return NextResponse.json({

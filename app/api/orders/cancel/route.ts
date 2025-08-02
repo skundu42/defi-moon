@@ -1,3 +1,5 @@
+
+// app/api/orders/cancel/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
 // Access shared storage
@@ -33,6 +35,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Prevent double-cancelling
+    if (order.cancelled) {
+      console.warn(`API: Order ${orderHash} already cancelled`);
+      return NextResponse.json(
+        { error: "Order already cancelled" },
+        { status: 409 }
+      );
+    }
+
+    // Prevent cancelling filled orders
+    if (order.filled) {
+      return NextResponse.json(
+        { error: "Cannot cancel filled order" },
+        { status: 409 }
+      );
+    }
+
     // Mark as cancelled
     order.cancelled = true;
     order.cancelledAt = Date.now();
@@ -53,3 +72,4 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+

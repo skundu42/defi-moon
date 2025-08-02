@@ -1,3 +1,5 @@
+
+// app/api/orders/fill/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
 // Access shared storage
@@ -33,15 +35,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Prevent double-filling
+    if (order.filled) {
+      console.warn(`API: Order ${orderHash} already filled`);
+      return NextResponse.json(
+        { error: "Order already filled" },
+        { status: 409 }
+      );
+    }
+
     // Mark as filled
     order.filled = true;
     order.fillTx = txHash;
     order.filledAt = Date.now();
     // Store the actual filled amount (for now, assume full fill)
-    order.filledTakingAmount = order.takingAmount;
+    order.filledTakingAmount = order.takingAmount || order.order?.takingAmount;
     orders.set(orderHash, order);
 
-    console.log(`API: Order ${orderHash} marked as filled`);
+    console.log(`API: Order ${orderHash} marked as filled with tx ${txHash}`);
 
     return NextResponse.json({
       success: true,
@@ -57,3 +68,4 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+

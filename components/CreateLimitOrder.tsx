@@ -36,11 +36,9 @@ import {
   TOKEN_ADDRESSES,
   vaultAbi,
   erc1155Abi,
+  ERC1155_PROXY_ADDRESS,
 } from "@/lib/contracts";
 import { submitOrder, cancelOrderInApi } from "@/lib/orderApi";
-
-// --- Contract Addresses ---
-const ERC1155_TRANSFER_PROXY_ADDRESS = "0x68Ccc1691AC63e0Ca99a3a4b4b61301d54CD2c0E" as ViemAddress;
 
 // --- Event ABI for SeriesDefined ---
 const SERIES_DEFINED = parseAbiItem(
@@ -188,7 +186,7 @@ export default function CreateLimitOrder() {
     const checkProxy = async () => {
       if (!publicClient) return;
       try {
-        const code = await publicClient.getBytecode({ address: ERC1155_TRANSFER_PROXY_ADDRESS });
+        const code = await publicClient.getBytecode({ address: ERC1155_PROXY_ADDRESS });
         if (code && code !== "0x") {
           setProxyExists(true);
           setProxyCheckError(null);
@@ -208,7 +206,7 @@ export default function CreateLimitOrder() {
     address: CALLTOKEN_ADDRESS,
     abi: erc1155Abi,
     functionName: "isApprovedForAll",
-    args: [address as ViemAddress, ERC1155_TRANSFER_PROXY_ADDRESS as ViemAddress],
+    args: [address as ViemAddress, ERC1155_PROXY_ADDRESS as ViemAddress],
     query: { enabled: Boolean(address) },
   });
 
@@ -262,18 +260,18 @@ export default function CreateLimitOrder() {
   const onApproveProxy = useCallback(async () => {
     if (!address || !writeContractAsync) return;
     try {
-      addNotice("📝 Approving ERC1155TransferProxy...");
+      addNotice("📝 Approving ERC1155Proxy...");
       const res = await writeContractAsync({
         address: CALLTOKEN_ADDRESS,
         abi: erc1155Abi,
         functionName: "setApprovalForAll",
-        args: [ERC1155_TRANSFER_PROXY_ADDRESS as ViemAddress, true],
+        args: [ERC1155_PROXY_ADDRESS as ViemAddress, true],
       });
       
       // Wait a bit for the transaction to be mined
       await new Promise((resolve) => setTimeout(resolve, 3000));
       await refetchApproval();
-      addNotice("✅ ERC1155TransferProxy approved successfully!");
+      addNotice("✅ ERC1155Proxy approved successfully!");
     } catch (error: any) {
       addNotice(`❌ Approval failed: ${error?.message || String(error)}`);
     }
@@ -339,7 +337,7 @@ export default function CreateLimitOrder() {
 
       // CRITICAL: Validate the order has proper 1inch flags
       const orderHasExtension = hasExtension(order.makerTraits);
-      const makerAssetIsProxy = order.makerAsset.toLowerCase() === ERC1155_TRANSFER_PROXY_ADDRESS.toLowerCase();
+      const makerAssetIsProxy = order.makerAsset.toLowerCase() === ERC1155_PROXY_ADDRESS.toLowerCase();
 
       console.log("🔍 Order validation:", {
         orderHash,
@@ -348,7 +346,7 @@ export default function CreateLimitOrder() {
         orderHasExtension,
         makerAssetIsProxy,
         makerAsset: order.makerAsset,
-        expectedProxy: ERC1155_TRANSFER_PROXY_ADDRESS,
+        expectedProxy: ERC1155_PROXY_ADDRESS,
         makerTraits: order.makerTraits.toString(),
         makerTraitsHex: "0x" + order.makerTraits.toString(16),
         salt: order.salt.toString(),
@@ -507,7 +505,7 @@ export default function CreateLimitOrder() {
 
   const handleSeriesSelection = useCallback((keys: any) => {
     const arr = Array.from(keys);
-    if (arr[0] && typeof arr[0] === "string") {
+    if (arr.length > 0 && typeof arr[0] === "string") {
       try {
         setSelectedSeriesId(BigInt(arr[0]));
       } catch {
@@ -519,14 +517,61 @@ export default function CreateLimitOrder() {
   }, []);
 
   const handleTakerSymChange = useCallback((keys: any) => {
-    const selectedKey = [...keys][0] as TokenSymbol;
-    setTakerSym(selectedKey);
+    const arr = Array.from(keys);
+    if (arr.length > 0) {
+      setTakerSym(arr[0] as TokenSymbol);
+    }
   }, []);
 
   const selectedSeries = useMemo(
     () => activeSeries.find((s) => s.id === selectedSeriesId),
     [activeSeries, selectedSeriesId]
   );
+
+  // Input validation helpers
+  const qtyValue = useMemo(() => {
+    try {
+      return qtyStr ? BigInt(qtyStr) : 0n;
+    } catch {
+      return 0n;
+    }
+  }, [qtyStr]);
+
+  const takerAmountValue = useMemo(() => {
+    try {
+      return takerAmountStr ? parseUnits(takerAmountStr, DECIMALS[takerSym]) : 0n;
+    } catch {
+      return 0n;
+    }
+  }, [takerAmountStr, takerSym]);
+
+  const isFormValid = useMemo(() => {
+    return (
+      isConnected &&
+      isApprovedForProxy &&
+      selectedSeriesId &&
+      !submitting &&
+      address &&
+      qtyStr &&
+      takerAmountStr &&
+      qtyValue > 0n &&
+      qtyValue <= optionBalance &&
+      takerAmountValue > 0n &&
+      proxyExists
+    );
+  }, [
+    isConnected,
+    isApprovedForProxy,
+    selectedSeriesId,
+    submitting,
+    address,
+    qtyStr,
+    takerAmountStr,
+    qtyValue,
+    optionBalance,
+    takerAmountValue,
+    proxyExists,
+  ]);
 
   return (
     <Card className="p-6 space-y-6 max-w-4xl mx-auto">
@@ -543,26 +588,26 @@ export default function CreateLimitOrder() {
       <div className="text-center">
         {proxyExists === null ? (
           <div className="text-sm text-default-500 bg-default-100 p-3 rounded-lg">
-            🔍 Checking ERC1155TransferProxy availability...
+            🔍 Checking ERC1155Proxy availability...
           </div>
         ) : proxyExists === false ? (
           <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg border border-red-200">
-            ⚠️ ERC1155TransferProxy not available. Please check contract deployment.
+            ⚠️ ERC1155Proxy not available. Please check contract deployment.
             <div className="text-xs mt-1 opacity-75">
               Error: {proxyCheckError}
             </div>
             <div className="text-xs mt-1 font-mono">
-              Address: {ERC1155_TRANSFER_PROXY_ADDRESS}
+              Address: {ERC1155_PROXY_ADDRESS}
             </div>
           </div>
         ) : (
           <div className="text-sm text-green-700 bg-green-50 p-3 rounded-lg border border-green-200">
-            ✅ ERC1155TransferProxy is available and ready
+            ✅ ERC1155Proxy is available and ready
             <div className="text-xs mt-1 opacity-75">
               Your ERC1155 tokens can be traded directly through 1inch using the transfer proxy
             </div>
             <div className="text-xs mt-1 font-mono">
-              Address: {ERC1155_TRANSFER_PROXY_ADDRESS}
+              Address: {ERC1155_PROXY_ADDRESS}
             </div>
           </div>
         )}
@@ -610,6 +655,7 @@ export default function CreateLimitOrder() {
             {activeSeries.map((s) => (
               <SelectItem
                 key={s.id.toString()}
+                value={s.id.toString()}
                 textValue={`Series ${s.id.toString()} • Strike ${formatUnits(s.strike, 18)} • Expires ${formatDateUTC(s.expiry)}`}
               >
                 <div className="flex flex-col py-1">
@@ -655,7 +701,7 @@ export default function CreateLimitOrder() {
           color={isApprovedForProxy ? "success" : "primary"}
           variant={isApprovedForProxy ? "flat" : "solid"}
         >
-          {isApprovedForProxy ? "✅ Transfer Proxy Approved" : "Approve ERC1155TransferProxy"}
+          {isApprovedForProxy ? "✅ Transfer Proxy Approved" : "Approve ERC1155Proxy"}
         </Button>
         <div className="text-xs text-default-600">
           This allows the transfer proxy to move your ERC1155 option tokens when orders are filled.
@@ -695,7 +741,7 @@ export default function CreateLimitOrder() {
               classNames={{ trigger: "h-12 bg-default-100", value: "text-sm" }}
             >
               {Object.keys(DECIMALS).map((sym) => (
-                <SelectItem key={sym} textValue={sym}>
+                <SelectItem key={sym} value={sym} textValue={sym}>
                   {sym}
                 </SelectItem>
               ))}
@@ -734,18 +780,7 @@ export default function CreateLimitOrder() {
           size="lg"
           onPress={onCreate}
           isLoading={submitting}
-          isDisabled={
-            !isConnected ||
-            !isApprovedForProxy ||
-            !selectedSeriesId ||
-            submitting ||
-            !address ||
-            !qtyStr ||
-            !takerAmountStr ||
-            BigInt(qtyStr || "0") > optionBalance ||
-            BigInt(qtyStr || "0") <= 0n ||
-            !proxyExists
-          }
+          isDisabled={!isFormValid}
           className="w-full h-14"
         >
           {submitting ? "Creating ERC-1155 Order..." : "Create & Sign ERC-1155 Limit Order"}
@@ -851,7 +886,7 @@ export default function CreateLimitOrder() {
             Debug Information (Development Only)
           </summary>
           <div className="mt-3 p-3 bg-default-100 rounded text-xs space-y-2">
-            <div><strong>Proxy Address:</strong> {ERC1155_TRANSFER_PROXY_ADDRESS}</div>
+            <div><strong>Proxy Address:</strong> {ERC1155_PROXY_ADDRESS}</div>
             <div><strong>CallToken Address:</strong> {CALLTOKEN_ADDRESS}</div>
             <div><strong>1inch LOP v4 Address:</strong> {LOP_V4_ADDRESS}</div>
             <div><strong>Selected Series ID:</strong> {selectedSeriesId?.toString() || "None"}</div>
@@ -859,6 +894,9 @@ export default function CreateLimitOrder() {
             <div><strong>Proxy Approved:</strong> {isApprovedForProxy ? "Yes" : "No"}</div>
             <div><strong>Wallet Connected:</strong> {isConnected ? "Yes" : "No"}</div>
             <div><strong>Active Series Count:</strong> {activeSeries.length}</div>
+            <div><strong>Form Valid:</strong> {isFormValid ? "Yes" : "No"}</div>
+            <div><strong>Quantity Value:</strong> {qtyValue.toString()}</div>
+            <div><strong>Taker Amount Value:</strong> {takerAmountValue.toString()}</div>
           </div>
         </details>
       )}

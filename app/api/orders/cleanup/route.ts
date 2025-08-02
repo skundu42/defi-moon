@@ -1,3 +1,5 @@
+
+// app/api/orders/cleanup/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
 // Access shared storage
@@ -21,13 +23,19 @@ export async function POST(_request: NextRequest) {
 
     for (const [hash, order] of orders.entries()) {
       try {
-        const expiration = Number((BigInt(order.order.makerTraits) >> 210n) & ((1n << 40n) - 1n));
+        // Get makerTraits from either nested order or top level
+        const makerTraits = BigInt(order.order?.makerTraits || order.makerTraits || "0");
+        const expiration = Number((makerTraits >> 210n) & ((1n << 40n) - 1n));
+        
+        // Remove if expired (expiration > 0 means there is an expiration set)
         if (expiration > 0 && expiration <= now) {
           orders.delete(hash);
           cleaned++;
+          console.log(`API: Cleaned expired order ${hash} (expired at ${expiration}, now ${now})`);
         }
-      } catch (e) {
-        // Skip invalid orders
+      } catch (error) {
+        // Skip invalid orders but log the error
+        console.warn(`API: Error processing order ${hash} during cleanup:`, error);
         continue;
       }
     }

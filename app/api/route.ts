@@ -50,8 +50,9 @@ export async function GET(request: NextRequest) {
         name: "Gnosis Chain"
       },
       contracts: {
-        vault: process.env.NEXT_PUBLIC_VAULT_ADDRESS || "0xB4048ce69523CF463bC37b648279e6EF66CaEBAf",
-        callToken: process.env.NEXT_PUBLIC_CALLTOKEN_ADDRESS || "0x7b964e3dC49DAcB3971CA49f53629e2e11885016",
+        vault: "0x42AD721db31C6eb65d8332BF0F7E26bff1eB9f6b",
+        callToken: "0x25D2203b0e4908594009A6e18b175f5996b08375",
+        erc1155Proxy: "0x5EaF7a20901e87FD60E4414E82C1c7e58903F713",
         oneInchLOP: "0x111111125421ca6dc452d289314280a0f8842a65"
       }
     };

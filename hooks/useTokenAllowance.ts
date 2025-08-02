@@ -42,13 +42,13 @@ export function useTokenAllowance(token?: Address, spender?: Address) {
   const { writeContractAsync, isPending } = useWriteContract();
 
   const approve = async (amount?: bigint) => {
-    if (!token) throw new Error("No token");
+    if (!token || !spender) throw new Error("No token or spender");
     const amt = amount ?? maxUint256; // default to infinite approve
     await writeContractAsync({
       abi: ABI,
       address: token,
       functionName: "approve",
-      args: [LOP_V4_GNOSIS, amt],
+      args: [spender, amt],
     });
     await refetchAllowance();
   };

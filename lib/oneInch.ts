@@ -1,11 +1,8 @@
-// lib/oneInch.ts
 import { Address, encodeAbiParameters, keccak256, encodePacked, getAddress } from "viem";
 import { ERC1155_PROXY_ADDRESS, CALLTOKEN_ADDRESS } from "./contracts";
 
-// 1inch Limit Order Protocol v4 address on Gnosis Chain
 export const LOP_V4_ADDRESS = "0x111111125421ca6dc452d289314280a0f8842a65" as const;
 
-// CRITICAL: The exact EIP-712 domain for 1inch LOP v4 on Gnosis Chain
 const DOMAIN = {
   name: "1inch Limit Order Protocol",
   version: "4",
@@ -13,7 +10,6 @@ const DOMAIN = {
   verifyingContract: LOP_V4_ADDRESS as Address,
 } as const;
 
-// Order struct types for EIP-712 - EXACT structure from 1inch v4
 const ORDER_TYPES = {
   Order: [
     { name: "salt", type: "uint256" },
@@ -27,7 +23,6 @@ const ORDER_TYPES = {
   ],
 } as const;
 
-// Bit positions in makerTraits for 1inch v4
 const ALLOW_MULTIPLE_FILLS_FLAG = 0n;
 const HAS_EXTENSION_FLAG = 255n; // Bit 255 for HAS_EXTENSION
 const EXPIRATION_OFFSET = 210n;
@@ -50,7 +45,6 @@ export interface ERC1155AssetData {
   amount: bigint;
   data: string;
 }
-
 
 function create1inchExtension(maker1155: ERC1155AssetData): {
   extension: string;
@@ -98,8 +92,18 @@ function create1inchExtension(maker1155: ERC1155AssetData): {
   const makerAssetSuffixOffset = 32; // Start after the offset table
   
   // Create offset table (8 uint32 values = 32 bytes total)
-  const offsetTable = encodePacked(
-    ["uint32", "uint32", "uint32", "uint32", "uint32", "uint32", "uint32", "uint32"],
+  // FIXED: Use encodeAbiParameters instead of encodePacked for proper formatting
+  const offsetTable = encodeAbiParameters(
+    [
+      { name: "makerAssetSuffixOffset", type: "uint32" },
+      { name: "takerAssetSuffixOffset", type: "uint32" },
+      { name: "reserved1", type: "uint32" },
+      { name: "reserved2", type: "uint32" },
+      { name: "reserved3", type: "uint32" },
+      { name: "reserved4", type: "uint32" },
+      { name: "reserved5", type: "uint32" },
+      { name: "reserved6", type: "uint32" },
+    ],
     [
       makerAssetSuffixOffset, // MakerAssetSuffix at bytes [0..3]
       0, // TakerAssetSuffix at bytes [4..7] (not used for options)
@@ -112,9 +116,22 @@ function create1inchExtension(maker1155: ERC1155AssetData): {
     ]
   );
 
-  // Combine: offset table + suffix data (remove 0x from suffix)
-  const extensionData = offsetTable + makerAssetSuffix.slice(2);
-  const extension = "0x" + extensionData;
+  // FIXED: Properly combine hex strings - both should not have 0x prefix when concatenating
+  const offsetTableHex = offsetTable.slice(2); // Remove 0x
+  const suffixHex = makerAssetSuffix.slice(2); // Remove 0x
+  const extension = "0x" + offsetTableHex + suffixHex;
+
+  // Validate the result is proper hex
+  if (!/^0x[0-9a-fA-F]+$/.test(extension)) {
+    console.error("❌ Generated invalid extension hex:", {
+      extension,
+      offsetTable,
+      makerAssetSuffix,
+      offsetTableHex,
+      suffixHex,
+    });
+    throw new Error("Generated extension contains invalid hex characters");
+  }
 
   // Calculate extension hash for salt validation (lowest 160 bits)
   const extensionHash = BigInt(keccak256(extension as `0x${string}`)) & ((1n << 160n) - 1n);
@@ -125,7 +142,8 @@ function create1inchExtension(maker1155: ERC1155AssetData): {
     extensionLength: extension.length,
     extensionSizeBytes: (extension.length - 2) / 2,
     extensionHash: "0x" + extensionHash.toString(16),
-    extension: extension.slice(0, 66) + "..." // First 32 bytes for debugging
+    extension: extension.slice(0, 66) + "...", // First 32 bytes for debugging
+    isValidHex: /^0x[0-9a-fA-F]+$/.test(extension),
   });
 
   return {

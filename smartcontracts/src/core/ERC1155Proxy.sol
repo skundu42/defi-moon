@@ -19,4 +19,3 @@ contract ERC1155Proxy {
         token.safeTransferFrom(from, to, tokenId, amount, data);
     }
 }
-/* solhint-enable func-name-mixedcase */

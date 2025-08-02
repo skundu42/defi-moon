@@ -35,9 +35,9 @@ export const Navbar = () => {
   // Safe access to github link with fallback
   const githubHref = (() => {
     try {
-      return (siteConfig as any)?.links?.github ?? "https://github.com";
+      return (siteConfig as any)?.links?.github ?? "https://github.com/skundu42/defi-moon";
     } catch {
-      return "https://github.com";
+      return "https://github.com/skundu42/defi-moon";
     }
   })();
 

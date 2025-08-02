@@ -6,7 +6,7 @@ import {OptionsVault} from "../src/core/OptionsVault.sol";
 import {CallToken} from "../src/token/CallToken.sol";
 import {ChainlinkPriceAdapter} from "../src/oracle/ChainlinkPriceAdapter.sol";
 import {IAggregatorV3} from "../src/oracle/interfaces/IAggregatorV3.sol";
-import {ERC1155TransferProxy} from "../src/core/ERC1155TransferProxy.sol";
+import {ERC1155Proxy} from "../src/core/ERC1155Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract Deploy is Script {
@@ -31,14 +31,16 @@ contract Deploy is Script {
         ChainlinkPriceAdapter adapter =
             new ChainlinkPriceAdapter(IAggregatorV3(CHAINLINK_GNO_USD_FEED), STALE_AFTER);
 
-        // 3) Deploy the 1inch ERC-1155 transfer proxy (no-arg constructor)
-        ERC1155TransferProxy proxy = new ERC1155TransferProxy();
+        // 3) Deploy the public ERC1155 proxy (no-arg constructor, anyone can call)
+        ERC1155Proxy proxy = new ERC1155Proxy();
 
         vm.stopBroadcast();
 
         console2.log("CallToken:               ", address(callToken));
         console2.log("OptionsVault:            ", address(vault));
         console2.log("Chainlink Adapter:       ", address(adapter));
-        console2.log("ERC1155 Transfer Proxy:  ", address(proxy));
+        console2.log("ERC1155 Proxy:           ", address(proxy));
+        console2.log("Admin:                   ", admin);
+        
     }
 }
